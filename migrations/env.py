@@ -4,6 +4,7 @@ from alembic import context
 from sqlalchemy import create_engine, pool
 
 from risk_radar.core.config import get_settings
+from risk_radar.db import models  # noqa: F401  # registers tables on Base.metadata
 from risk_radar.db.base import Base
 
 config = context.config
