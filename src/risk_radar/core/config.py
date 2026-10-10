@@ -1,0 +1,53 @@
+"""Environment-backed application settings."""
+
+from functools import lru_cache
+
+from pydantic import SecretStr
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import URL
+
+
+class Settings(BaseSettings):
+    """Runtime configuration for the API and infrastructure connections."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    app_name: str = "Risk Radar API"
+    app_environment: str = "local"
+
+    postgres_host: str = "localhost"
+    postgres_port: int = 5432
+    postgres_db: str = "risk_radar"
+    postgres_user: str = "risk_radar"
+    postgres_password: SecretStr = SecretStr("local-only-change-me")
+
+    redis_url: str = "redis://localhost:6379/0"
+
+    minio_endpoint: str = "localhost:9000"
+    minio_access_key: str = "minioadmin"
+    minio_secret_key: SecretStr = SecretStr("local-only-change-me")
+    minio_bucket: str = "risk-radar"
+    minio_secure: bool = False
+
+    @property
+    def database_url(self) -> URL:
+        """Build a safely escaped SQLAlchemy URL from PostgreSQL settings."""
+        return URL.create(
+            drivername="postgresql+psycopg",
+            username=self.postgres_user,
+            password=self.postgres_password.get_secret_value(),
+            host=self.postgres_host,
+            port=self.postgres_port,
+            database=self.postgres_db,
+        )
+
+
+@lru_cache
+def get_settings() -> Settings:
+    """Return cached settings so all app modules use one configuration."""
+    return Settings()
