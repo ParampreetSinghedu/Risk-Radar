@@ -1,0 +1,1 @@
+"""Risk Radar application package."""
