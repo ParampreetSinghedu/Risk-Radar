@@ -37,6 +37,14 @@ class Settings(BaseSettings):
     minio_bucket: str = "risk-radar"
     minio_secure: bool = False
 
+    # Discovery feeds (Stage 3)
+    urlhaus_auth_key: SecretStr | None = None
+
+    # LLM investigator (Stage 9)
+    llm_provider: str = ""
+    llm_model: str = "claude-3-5-haiku-latest"
+    anthropic_api_key: SecretStr | None = None
+
     @property
     def database_url(self) -> URL:
         """Build a safely escaped SQLAlchemy URL from PostgreSQL settings."""
