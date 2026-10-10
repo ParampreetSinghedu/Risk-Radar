@@ -23,6 +23,7 @@ from risk_radar.evidence.base import utcnow
 from risk_radar.evidence.brand_profile import BrandProfileAnalyzer
 from risk_radar.evidence.image_text import ImageAnalyzer, TextAnalyzer
 from risk_radar.evidence.url_domain import UrlDomainAnalyzer
+from risk_radar.evidence.vision import VisionProvider
 
 AnalyzerName = Literal["url", "brand_profile", "text", "image"]
 
@@ -73,11 +74,14 @@ class EvidenceEngine:
         brand: BrandProfileAnalyzer | None = None,
         text: TextAnalyzer | None = None,
         image: ImageAnalyzer | None = None,
+        vision: VisionProvider | None = None,
     ) -> None:
         self._url = url or UrlDomainAnalyzer()
         self._brand = brand or BrandProfileAnalyzer()
         self._text = text or TextAnalyzer()
-        self._image = image or ImageAnalyzer()
+        # Image analysis is optional: a vision provider is used when configured,
+        # otherwise the analyzer reports an explicit unavailable status.
+        self._image = image or ImageAnalyzer(vision=vision)
 
     def analyze(self, db: Session, request: EvidenceRequest) -> EvidenceAnalysisResult:
         """Analyze one candidate; analyzer errors never abort the run."""

@@ -10,12 +10,14 @@ from typing import Annotated
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
+from risk_radar.core.config import get_settings
 from risk_radar.db.session import get_db
 from risk_radar.evidence.service import (
     EvidenceAnalysisResult,
     EvidenceEngine,
     EvidenceRequest,
 )
+from risk_radar.evidence.vision import get_vision_provider
 
 router = APIRouter(tags=["evidence"])
 
@@ -30,4 +32,5 @@ def analyze_evidence(
     db: Annotated[Session, Depends(get_db)],
 ) -> EvidenceAnalysisResult:
     """Run configured analyzers over one candidate; failures are isolated."""
-    return EvidenceEngine().analyze(db, payload)
+    vision = get_vision_provider(get_settings())
+    return EvidenceEngine(vision=vision).analyze(db, payload)

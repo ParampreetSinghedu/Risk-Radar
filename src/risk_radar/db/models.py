@@ -97,3 +97,50 @@ class ExclusionAuditLog(Base):
     decided_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
+
+
+class CaseStatus(StrEnum):
+    """Workflow states for a Stage 13 case."""
+
+    OPEN = "open"
+    IN_REVIEW = "in_review"
+    CLOSED = "closed"
+
+
+class Case(Base):
+    """A triaged investigation case grouping evidence for analyst review (Stage 13)."""
+
+    __tablename__ = "cases"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    target: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default=CaseStatus.OPEN)
+    # Gate outcome captured when the case was created (never trusted from client).
+    gate_outcome: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    alert_eligible: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # JSON blob holding the stored stage results snapshot (evidence/risk/etc).
+    snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
+class CaseEvent(Base):
+    """Append-only analyst decision / note on a case (Stage 13 human review)."""
+
+    __tablename__ = "case_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    case_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("cases.id"), nullable=False, index=True
+    )
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    note: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    actor: Mapped[str] = mapped_column(String(64), nullable=False, default="analyst")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )

@@ -4,10 +4,12 @@ Text analysis is fully supported with the standard library (read-only): it
 extracts observable signals (embedded URLs, handles, urgency phrases) and
 reports them with provenance. Nothing is classified as malicious here.
 
-Image analysis depends on an OCR/image backend. None is installed in this
-project by default, so the analyzer reports an explicit ``unavailable`` status
-and a limitation unless a backend is injected. It never fabricates OCR text,
-logo matches or image contents.
+Image analysis depends on an OCR/image backend. None is installed by default,
+so the analyzer reports an explicit ``unavailable`` status and a limitation
+unless a backend is injected. An optional Claude vision provider
+(``risk_radar.evidence.vision``) can be injected to extract visible text from
+screenshots; without credentials the analyzer stays ``unavailable`` and never
+fabricates OCR text, logo matches or image contents.
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ from risk_radar.evidence.base import (
     evidence_record,
     signal_observation,
 )
+from risk_radar.evidence.vision import VisionError, VisionProvider, validate_image
 
 _URL_RE = re.compile(r"https?://[^\s<>\"']+|www\.[^\s<>\"']+", re.IGNORECASE)
 _HANDLE_RE = re.compile(r"@[A-Za-z0-9_.]{1,50}\b")
@@ -159,16 +162,23 @@ class TextAnalyzer:
 
 
 class ImageAnalyzer:
-    """Image inspection through an optional OCR backend.
+    """Image inspection through an optional OCR or vision backend.
 
     Without a backend the result is explicitly ``unavailable``; image contents
-    are never guessed.
+    are never guessed. A ``VisionProvider`` (for example the Claude adapter) may
+    be injected to extract visible text. Image bytes are validated (format and
+    size) before any provider call and treated as untrusted input.
     """
 
     analyzer_type = "image"
 
-    def __init__(self, ocr: OcrBackend | None = None) -> None:
-        self._ocr = ocr or UnavailableOcr()
+    def __init__(
+        self,
+        ocr: OcrBackend | None = None,
+        vision: VisionProvider | None = None,
+    ) -> None:
+        self._ocr = ocr
+        self._vision = vision
 
     def analyze(
         self,
@@ -198,23 +208,129 @@ class ImageAnalyzer:
                 size=len(image),
             )
         ]
-        extracted = self._ocr.extract_text(image)
-        if extracted is None:
+
+        limitations: list[str] = []
+
+        # 1) Legacy OCR backend (if injected) takes precedence. It is a local
+        #    function without the vision API's format/size constraints, so no
+        #    image-format validation is applied here.
+        if self._ocr is not None:
+            extracted = self._ocr.extract_text(image)
+            if extracted is None:
+                return self._unavailable(
+                    input_id, input_type, investigation_id, evidence, limitations
+                )
+            return self._completed(
+                extracted,
+                "ocr_backend",
+                input_id,
+                input_type,
+                investigation_id,
+                evidence,
+                limitations,
+            )
+
+        # 2) Optional vision provider. Validate format/size before the network
+        #    call (untrusted input); any problem blocks the call and fails
+        #    explicitly rather than guessing.
+        media_type, problems = validate_image(image)
+        if problems:
             return build_result(
                 analyzer_type="image",
                 input_type=input_type,
-                status="unavailable",
+                status="failed",
                 input_id=input_id,
                 investigation_id=investigation_id,
                 evidence=evidence,
-                assessment=assessment_from_reasons([]),
-                limitations=[
-                    "OCR/image backend unavailable: no text or logo could be extracted "
-                    "and none was fabricated"
-                ],
+                errors=[{"stage": "validate", "message": problem} for problem in problems],
+                limitations=problems,
             )
 
-        observations = [signal_observation("ocr_text", extracted, "ocr_backend")]
+        if self._vision is not None and media_type is not None:
+            try:
+                extracted = self._vision.extract_text(image, media_type)
+            except VisionError as exc:
+                return build_result(
+                    analyzer_type="image",
+                    input_type=input_type,
+                    status="unavailable",
+                    input_id=input_id,
+                    investigation_id=investigation_id,
+                    evidence=evidence,
+                    errors=[{"stage": "vision", "message": str(exc)}],
+                    limitations=limitations
+                    + ["vision provider failed: no text was extracted and none was fabricated"],
+                )
+            except Exception as exc:  # noqa: BLE001 - timeouts or unexpected failures
+                return build_result(
+                    analyzer_type="image",
+                    input_type=input_type,
+                    status="unavailable",
+                    input_id=input_id,
+                    investigation_id=investigation_id,
+                    evidence=evidence,
+                    errors=[{"stage": "vision", "message": exc.__class__.__name__}],
+                    limitations=limitations
+                    + [
+                        f"vision provider error ({exc.__class__.__name__}): no text "
+                        "was extracted and none was fabricated"
+                    ],
+                )
+            return self._completed(
+                extracted,
+                f"vision:{self._vision.name}",
+                input_id,
+                input_type,
+                investigation_id,
+                evidence,
+                limitations,
+                media_type=media_type,
+            )
+
+        return self._unavailable(input_id, input_type, investigation_id, evidence, limitations)
+
+    @staticmethod
+    def _unavailable(input_id, input_type, investigation_id, evidence, limitations):
+        return build_result(
+            analyzer_type="image",
+            input_type=input_type,
+            status="unavailable",
+            input_id=input_id,
+            investigation_id=investigation_id,
+            evidence=evidence,
+            assessment=assessment_from_reasons([]),
+            limitations=limitations
+            + [
+                "OCR/image backend unavailable: no text or logo could be extracted "
+                "and none was fabricated"
+            ],
+        )
+
+    @staticmethod
+    def _completed(
+        extracted,
+        method,
+        input_id,
+        input_type,
+        investigation_id,
+        evidence,
+        limitations,
+        media_type=None,
+    ):
+        observations = [signal_observation("ocr_text", extracted, method)]
+        if media_type:
+            observations.append(signal_observation("media_type", media_type, "image_validation"))
+        # Provenance: record which observation came from the image itself.
+        evidence.append(
+            evidence_record(
+                input_id,
+                "ocr",
+                f"extracted {len(extracted)} characters from image via {method}",
+                method=method,
+                chars=len(extracted),
+                **({"media_type": media_type} if media_type else {}),
+            )
+        )
         return build_result(
             analyzer_type="image",
             input_type=input_type,
@@ -224,4 +340,5 @@ class ImageAnalyzer:
             observations=observations,
             evidence=evidence,
             assessment=assessment_from_reasons(["ocr_text"], confidence=1.0),
+            limitations=limitations,
         )
