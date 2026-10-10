@@ -58,4 +58,4 @@ migrations/       # Alembic environment and empty revisions directory
 tests/            # pytest suite
 ```
 
-PostgreSQL connection settings, Redis URL, and MinIO endpoint/credentials are loaded from environment variables. SQLAlchemy's declarative base and session factory plus Alembic's environment are present as scaffolding; no domain models or migrations are included yet. The Docker image uses Python 3.12, and the Compose file starts the API, PostgreSQL, Redis, and MinIO together.
+PostgreSQL settings, Redis host/port/database/password, and MinIO endpoint/credentials are loaded from environment variables. SQLAlchemy's declarative base and session factory plus Alembic's environment are present as scaffolding; no domain models or migrations are included yet. The Docker image uses Python 3.12, and the Compose file starts the API, PostgreSQL, Redis, and MinIO together.

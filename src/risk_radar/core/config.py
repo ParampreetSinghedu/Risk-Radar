@@ -26,7 +26,10 @@ class Settings(BaseSettings):
     postgres_user: str = "risk_radar"
     postgres_password: SecretStr = SecretStr("local-only-change-me")
 
-    redis_url: str = "redis://localhost:6379/0"
+    redis_host: str = "localhost"
+    redis_port: int = 6379
+    redis_db: int = 0
+    redis_password: SecretStr = SecretStr("local-only-change-me")
 
     minio_endpoint: str = "localhost:9000"
     minio_access_key: str = "minioadmin"
@@ -45,6 +48,18 @@ class Settings(BaseSettings):
             port=self.postgres_port,
             database=self.postgres_db,
         )
+
+    @property
+    def redis_url(self) -> str:
+        """Build a Redis URL with its password safely URL-encoded."""
+        return URL.create(
+            drivername="redis",
+            username="",
+            password=self.redis_password.get_secret_value(),
+            host=self.redis_host,
+            port=self.redis_port,
+            database=str(self.redis_db),
+        ).render_as_string(hide_password=False)
 
 
 @lru_cache
