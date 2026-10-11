@@ -8,6 +8,7 @@ WORKDIR /app
 COPY pyproject.toml README.md alembic.ini ./
 COPY migrations ./migrations
 COPY src ./src
+COPY app ./app
 RUN pip install --no-cache-dir .
 
 EXPOSE 8000
