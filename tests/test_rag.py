@@ -431,3 +431,133 @@ def test_api_endpoint_no_provider_returns_structured(client):
 def test_api_rejects_missing_target(client):
     response = client.post("/api/v1/rag/analyze", json={})
     assert response.status_code == 422
+
+
+# --- Priority 2: strict citation guidance tests -----------------------------
+
+
+def test_claims_citing_target_alone_are_rejected(client):
+    session = _session_from_client(client)
+    response = json.dumps(
+        {
+            "risk_factors": [
+                {
+                    "kind": "observed_fact",
+                    "text": "target domain flags phishing",
+                    "citations": ["target"],
+                }
+            ]
+        }
+    )
+    engine = RAGAnalysisEngine(
+        provider=FakeProvider(response), retriever=FakeRetriever(docs=[_doc("submission:1")])
+    )
+    result = engine.analyze(session, RAGRequest(target="http://bad.example.com"))
+    assert result.claims == []
+    assert result.rejected_claims
+    rejected = result.rejected_claims[0]
+    assert "target" in rejected.get("unknown_citations", [])
+    assert any(
+        "unknown" in r["reason"] or "no valid citation" in r["reason"]
+        for r in result.rejected_claims
+    )
+
+
+def test_claims_citing_unretrieved_or_invented_ids_are_rejected(client):
+    session = _session_from_client(client)
+    response = json.dumps(
+        {
+            "risk_factors": [
+                {
+                    "kind": "model_inference",
+                    "text": "inferred from unretrieved brand asset",
+                    "citations": ["brand_asset:999"],
+                }
+            ]
+        }
+    )
+    engine = RAGAnalysisEngine(
+        provider=FakeProvider(response), retriever=FakeRetriever(docs=[_doc("submission:1")])
+    )
+    result = engine.analyze(session, RAGRequest(target="http://bad.example.com"))
+    assert result.claims == []
+    assert result.rejected_claims
+    assert "brand_asset:999" in result.rejected_claims[0].get("unknown_citations", [])
+
+
+def test_unsupported_factual_claims_not_silently_accepted(client):
+    session = _session_from_client(client)
+    response = json.dumps(
+        {
+            "risk_factors": [
+                {
+                    "kind": "observed_fact",
+                    "text": "unsupported fact with null citations",
+                    "citations": None,
+                },
+                {
+                    "kind": "model_inference",
+                    "text": "unsupported inference with empty citations",
+                    "citations": [],
+                },
+            ]
+        }
+    )
+    engine = RAGAnalysisEngine(
+        provider=FakeProvider(response), retriever=FakeRetriever(docs=[_doc("submission:1")])
+    )
+    result = engine.analyze(session, RAGRequest(target="http://bad.example.com"))
+    assert result.claims == []
+    assert len(result.rejected_claims) == 2
+    assert all("no valid citation" in r["reason"] for r in result.rejected_claims)
+
+
+def test_claims_citing_valid_retrieved_documents_pass_validation(client):
+    session = _session_from_client(client)
+    response = json.dumps(
+        {
+            "risk_factors": [
+                {
+                    "kind": "observed_fact",
+                    "text": "matched known submission",
+                    "confidence": 0.95,
+                    "citations": ["submission:1"],
+                },
+                {
+                    "kind": "model_inference",
+                    "text": "domain impersonates registered asset",
+                    "confidence": 0.85,
+                    "citations": ["brand_asset:2"],
+                },
+            ],
+            "uncertainties": [],
+            "recommended_next_actions": [
+                {
+                    "kind": "recommendation",
+                    "text": "issue domain takedown",
+                    "basis": "high confidence impersonation",
+                }
+            ],
+        }
+    )
+    docs = [_doc("submission:1"), _doc("brand_asset:2", source_type="brand_asset")]
+    engine = RAGAnalysisEngine(provider=FakeProvider(response), retriever=FakeRetriever(docs=docs))
+    result = engine.analyze(session, RAGRequest(target="http://bad.example.com"))
+    assert result.status == "completed"
+    assert len(result.claims) == 3
+    assert len(result.risk_factors) == 2
+    assert result.risk_factors[0].citations[0].doc_id == "submission:1"
+    assert result.risk_factors[1].citations[0].doc_id == "brand_asset:2"
+    assert result.rejected_claims == []
+
+
+def test_system_prompt_instructs_strict_citations(client):
+    session = _session_from_client(client)
+    provider = FakeProvider("{}")
+    engine = RAGAnalysisEngine(provider=provider, retriever=FakeRetriever(docs=[_doc()]))
+    engine.analyze(session, RAGRequest(target="http://bad.example.com"))
+    prompt = provider.calls[0]["system"]
+    assert "Cite ONLY document IDs present in the supplied retrieved_documents list" in prompt
+    assert 'NEVER cite "target" as evidence' in prompt
+    assert "Do NOT invent document IDs, citations, or facts" in prompt
+    assert "insufficient to ground a claim, return no factual claim" in prompt

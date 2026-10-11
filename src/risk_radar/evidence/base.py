@@ -24,7 +24,7 @@ from app.schemas.evidence import (
     SourceReference,
 )
 
-AnalyzerKind = Literal["url", "brand_profile", "image", "text"]
+AnalyzerKind = Literal["url", "brand_profile", "image", "text", "application"]
 
 # Severity levels shared with the teammate schema (kept explicit for callers).
 Severity = Literal["informational", "low", "medium", "high", "critical", "unknown"]
@@ -53,7 +53,7 @@ def clamp_confidence(value: Any) -> float | None:
 
 
 def claimed_identity_observation(
-    kind: Literal["domain", "handle", "name"], value: str, confidence: float | None
+    kind: Literal["domain", "handle", "name", "application"], value: str, confidence: float | None
 ) -> dict[str, Any]:
     """Build a claimed-identity observation in the Stage 6 gate convention.
 

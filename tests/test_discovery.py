@@ -15,7 +15,7 @@ from risk_radar.discovery.base import (
     DiscoveryConnector,
 )
 from risk_radar.discovery.connectors.openphish import FEED_URL, OpenPhishConnector
-from risk_radar.discovery.connectors.stubs import WebSearchConnector
+from risk_radar.discovery.connectors.stubs import SocialPlatformConnector, WebSearchConnector
 from risk_radar.discovery.connectors.urlhaus import URLhausConnector
 from risk_radar.discovery.service import DiscoveryService
 from risk_radar.main import app
@@ -258,6 +258,46 @@ def test_interface_only_connector_reports_unavailability() -> None:
         assert "web_search" in str(exc)
 
 
+def test_social_provider_contract_preserves_actual_profile_provenance() -> None:
+    class Provider:
+        def search_profiles(self, query: str) -> list[Candidate]:
+            assert query == "acme"
+            return [
+                Candidate(
+                    source="authorized_test_provider",
+                    source_reference="https://api.example/profile/42",
+                    candidate_type=CandidateType.SOCIAL_PROFILE,
+                    target="@acme_support",
+                    metadata={"display_name": "Acme Support", "provider_profile_id": "42"},
+                )
+            ]
+
+    candidates = SocialPlatformConnector(provider=Provider()).search("acme")
+    assert len(candidates) == 1
+    assert candidates[0].target == "@acme_support"
+    assert candidates[0].metadata["provider_profile_id"] == "42"
+    assert candidates[0].provenance[0].source == "authorized_test_provider"
+    assert candidates[0].provenance[0].discovered_at == candidates[0].discovered_at
+
+
+def test_social_provider_errors_and_unavailable_source_are_explicit() -> None:
+    try:
+        SocialPlatformConnector().search("acme")
+        raise AssertionError("expected explicit provider unavailability")
+    except ConnectorUnavailableError as exc:
+        assert "authorized platform API provider" in str(exc)
+
+    class RateLimitedProvider:
+        def search_profiles(self, query: str) -> list[Candidate]:
+            raise ConnectorUnavailableError("authorized_social_api: rate limited; retry later")
+
+    result = DiscoveryService([SocialPlatformConnector(provider=RateLimitedProvider())]).discover(
+        "acme"
+    )
+    assert result.candidates == []
+    assert result.failures[0].reason == "authorized_social_api: rate limited; retry later"
+
+
 def test_discover_endpoint_rejects_invalid_input(client: TestClient) -> None:
     """Blank or missing queries return 422 before any connector runs."""
     assert client.post("/api/v1/discover", json={"query": ""}).status_code == 422
@@ -284,3 +324,30 @@ def test_discover_endpoint_returns_candidates_and_failures(client: TestClient) -
     assert body["failures"] == [{"source": "down", "reason": "down: offline"}]
     assert body["candidates"][0]["candidate_id"]
     assert body["candidates"][0]["provenance"][0]["source"] == "good"
+
+
+def test_discover_endpoint_adds_brand_similarity_to_real_provider_candidate(
+    client: TestClient,
+) -> None:
+    brand = client.post("/api/v1/brands", json={"name": "Acme"}).json()
+    client.post(
+        f"/api/v1/brands/{brand['id']}/assets",
+        json={"asset_type": "account", "value": "@acme", "verified": True},
+    )
+    profile = Candidate(
+        source="authorized_test_provider",
+        source_reference="https://api.example/profiles/acmee",
+        candidate_type=CandidateType.SOCIAL_PROFILE,
+        target="@acmee",
+        metadata={"display_name": "Acme Support"},
+    )
+    app.dependency_overrides[get_discovery_service] = lambda: DiscoveryService(
+        [FakeConnector("authorized_test_provider", [profile])]
+    )
+    response = client.post("/api/v1/discover", json={"query": "Acme Support"})
+    assert response.status_code == 200
+    candidate = response.json()["candidates"][0]
+    assert candidate["source"] == "authorized_test_provider"
+    analysis = candidate["metadata"]["brand_profile_analysis"]
+    assert analysis["status"] == "completed"
+    assert any(item["kind"] == "heuristic_similarity" for item in analysis["indicators"])

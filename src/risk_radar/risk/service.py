@@ -124,7 +124,7 @@ class RiskImpactRequest(BaseModel):
     """Candidate to score; gate eligibility is decided server-side only."""
 
     target: str = Field(min_length=1, max_length=2048)
-    kind: Literal["auto", "domain", "handle", "name"] = "auto"
+    kind: Literal["auto", "domain", "handle", "name", "application"] = "auto"
     analysis: AnalyzerEvidence | None = None
     candidate_ref: str | None = Field(default=None, max_length=255)
     # Optional Stage 9/10 context. Correlation alone never sets maliciousness.

@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 
 
 SchemaStatus = Literal["completed", "partial", "unavailable", "failed"]
-AnalyzerType = Literal["url", "brand_profile", "image", "text"]
+AnalyzerType = Literal["url", "brand_profile", "image", "text", "application"]
 
 
 class SourceReference(BaseModel):

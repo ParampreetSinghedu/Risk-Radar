@@ -1,4 +1,6 @@
-"""Interface-only connector adapters awaiting credentials or provider configuration."""
+"""Connector adapters awaiting a supported provider or its configuration."""
+
+from typing import Protocol
 
 from risk_radar.discovery.base import (
     Candidate,
@@ -18,13 +20,40 @@ class WebSearchConnector(DiscoveryConnector):
 
 
 class SocialPlatformConnector(DiscoveryConnector):
-    """Social platform adapter; no platform API credentials are configured yet."""
+    """Provider-backed social search; never scrapes a platform implicitly."""
 
     name = "social"
 
+    def __init__(self, provider: "SocialProfileProvider | None" = None) -> None:
+        self.provider = provider
+
     def search(self, query: str) -> list[Candidate]:
-        """Raise an explicit availability error until credentials are configured."""
-        raise ConnectorUnavailableError("social: no platform API credentials are configured")
+        """Return sourced profiles or an explicit unavailable/provider error."""
+        if self.provider is None:
+            raise ConnectorUnavailableError(
+                "social: no authorized platform API provider is configured"
+            )
+        candidates = self.provider.search_profiles(query)
+        invalid = [item for item in candidates if item.candidate_type.value != "social_profile"]
+        if invalid:
+            raise ConnectorUnavailableError(
+                "social: provider returned records that are not social profiles"
+            )
+        return candidates
+
+
+class SocialProfileProvider(Protocol):
+    """Contract for a platform API the operator is authorized to use.
+
+    Implementations must return genuine provider records with source references,
+    timestamps, and profile metadata. They must handle authentication and rate
+    limits without scraping or bypassing platform controls.
+    """
+
+    name: str
+
+    def search_profiles(self, query: str) -> list[Candidate]:
+        """Discover profiles for a query using the provider's authorized API."""
 
 
 class AppStoreConnector(DiscoveryConnector):

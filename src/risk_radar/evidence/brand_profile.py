@@ -66,6 +66,7 @@ class BrandProfileAnalyzer:
         input_id: str = "target",
         input_type: str = "social_profile",
         investigation_id: str = "unspecified",
+        brand_id: int | None = None,
     ) -> AnalyzerResult:
         """Inspect a candidate against registered brands; never declares safe."""
         raw = target.strip()
@@ -81,11 +82,14 @@ class BrandProfileAnalyzer:
             )
 
         identity_kind, needle = self._identity(raw, kind)
-        rows = db.execute(
+        asset_query = (
             select(BrandAsset, Brand)
             .join(Brand, Brand.id == BrandAsset.brand_id)
             .order_by(BrandAsset.id)
-        ).all()
+        )
+        if brand_id is not None:
+            asset_query = asset_query.where(Brand.id == brand_id)
+        rows = db.execute(asset_query).all()
 
         observations: list[dict[str, Any]] = []
         indicators: list[dict[str, Any]] = []

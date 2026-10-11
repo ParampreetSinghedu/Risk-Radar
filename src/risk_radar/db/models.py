@@ -3,7 +3,16 @@
 from datetime import UTC, datetime
 from enum import StrEnum
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from risk_radar.db.base import Base
@@ -170,6 +179,105 @@ class HumanReview(Base):
     tags: Mapped[str | None] = mapped_column(Text, nullable=True)
     features_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     label: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
+class MonitoringTarget(Base):
+    """Persisted configuration and scheduling state for one monitored identity."""
+
+    __tablename__ = "monitoring_targets"
+    __table_args__ = (
+        CheckConstraint(
+            "interval_seconds >= 60 AND interval_seconds <= 2592000", name="ck_monitoring_interval"
+        ),
+        UniqueConstraint("target_type", "target", name="uq_monitoring_target_identity"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    brand_id: Mapped[int | None] = mapped_column(ForeignKey("brands.id"), nullable=True, index=True)
+    target_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    target: Mapped[str] = mapped_column(Text, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    removed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    interval_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=3600)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    next_check_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    last_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    check_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    last_status: Mapped[str] = mapped_column(String(24), nullable=False, default="never_checked")
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class MonitoringCheck(Base):
+    """One durable attempt to check a monitoring target."""
+
+    __tablename__ = "monitoring_checks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    target_id: Mapped[int] = mapped_column(
+        ForeignKey("monitoring_targets.id"), nullable=False, index=True
+    )
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    providers_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    result_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class MonitoringObservation(Base):
+    """Latest observed version of a stable finding key for change comparison."""
+
+    __tablename__ = "monitoring_observations"
+    __table_args__ = (
+        UniqueConstraint("target_id", "observation_key", name="uq_monitor_observation_key"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    target_id: Mapped[int] = mapped_column(
+        ForeignKey("monitoring_targets.id"), nullable=False, index=True
+    )
+    observation_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    source: Mapped[str] = mapped_column(String(128), nullable=False)
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_check_id: Mapped[int] = mapped_column(ForeignKey("monitoring_checks.id"), nullable=False)
+
+
+class MonitoringAlert(Base):
+    """Actionable, persisted change associated with its check and observation."""
+
+    __tablename__ = "monitoring_alerts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    target_id: Mapped[int] = mapped_column(
+        ForeignKey("monitoring_targets.id"), nullable=False, index=True
+    )
+    check_id: Mapped[int] = mapped_column(
+        ForeignKey("monitoring_checks.id"), nullable=False, index=True
+    )
+    observation_id: Mapped[int] = mapped_column(
+        ForeignKey("monitoring_observations.id"), nullable=False, index=True
+    )
+    change_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_json: Mapped[str] = mapped_column(Text, nullable=False)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    acknowledged_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )

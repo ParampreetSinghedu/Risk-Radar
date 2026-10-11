@@ -208,6 +208,11 @@ class UrlDomainAnalyzer:
             registration = self._rdap.registration(reg)
             if registration:
                 observations.append(signal_observation("registration", registration, "rdap_client"))
+                age_days = registration.get("domain_age_days")
+                if isinstance(age_days, int) and not isinstance(age_days, bool) and age_days >= 0:
+                    observations.append(
+                        signal_observation("domain_age_days", age_days, "rdap_client")
+                    )
                 created = registration.get("created")
                 if created is not None:
                     evidence.append(

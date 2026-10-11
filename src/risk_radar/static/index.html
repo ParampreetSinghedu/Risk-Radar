@@ -83,6 +83,7 @@
       <button data-view="dashboard" class="active">Dashboard</button>
       <button data-view="submit">Submit Evidence</button>
       <button data-view="investigate">Investigate</button>
+      <button data-view="monitoring">Monitoring</button>
       <button data-view="cases">Cases</button>
       <button data-view="alerts">Alerts</button>
       <button data-view="reviews">Reviews &amp; Feedback</button>
@@ -129,6 +130,12 @@
     <div class="panel">
       <h2>Investigate a candidate</h2>
       <p class="muted" style="font-size:13px">Runs the real pipeline: Stage 6 gate → Stage 5 evidence → Stage 7 rules → Stage 11 risk → Stage 12 grounded analysis. Every stage shows an explicit status; missing results are shown as unavailable, never faked.</p>
+      <label>Candidate type</label>
+      <select id="inv-type">
+        <option value="auto">URL or name</option>
+        <option value="social_profile">Social profile handle</option>
+        <option value="app_listing">App listing / identifier</option>
+      </select>
       <label>Target</label>
       <input type="text" id="inv-target" placeholder="https://suspicious.example.com" />
       <button class="btn" id="inv-btn">Run pipeline</button>
@@ -145,6 +152,12 @@
         <input type="text" id="case-title" placeholder="PayPal lookalike campaign" />
         <label>Target</label>
         <input type="text" id="case-target" placeholder="https://suspicious.example.com" />
+        <label>Target type</label>
+        <select id="case-kind">
+          <option value="auto">URL or name</option>
+          <option value="handle">Social handle</option>
+          <option value="application">App listing / identifier</option>
+        </select>
         <label>Attach current investigation snapshot (optional)</label>
         <select id="case-snapshot"><option value="">No snapshot</option></select>
         <label>Opening note (optional)</label>
@@ -178,6 +191,44 @@
       <div id="alerts-list"><div class="state">Loading…</div></div>
     </div>
     <div class="panel" id="report-panel" style="display:none"></div>
+  </section>
+
+  <!-- MONITORING -->
+  <section id="view-monitoring" class="view">
+    <div class="split">
+      <div class="panel">
+        <h2>Create monitoring target</h2>
+        <p class="muted" style="font-size:13px">Checks use configured providers. A target is marked active only after a successful provider check.</p>
+        <label>Target type</label>
+        <select id="mon-type">
+          <option value="domain">Domain</option>
+          <option value="social_profile">Social handle</option>
+          <option value="application">App ID / listing</option>
+        </select>
+        <label>Domain, @handle, package ID, or store listing URL</label>
+        <input type="text" id="mon-target" placeholder="example.com, @brand, or app identifier" />
+        <label>Brand ID (optional)</label>
+        <input type="text" id="mon-brand" placeholder="Registered brand ID" />
+        <label>Check interval in seconds (60–2592000)</label>
+        <input type="text" id="mon-interval" value="3600" />
+        <button class="btn" id="mon-create">Create target</button>
+      </div>
+      <div class="panel">
+        <h2>Monitoring status</h2>
+        <p class="muted" style="font-size:13px">Scheduler is opt-in via MONITORING_SCHEDULER_ENABLED. “Unavailable” means the configured provider did not deliver a complete check. Partial attempts do not clear prior findings.</p>
+        <button class="btn secondary" id="mon-refresh">Refresh targets and alerts</button>
+        <div id="mon-status" class="state">Loading…</div>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Targets and check history</h2>
+      <div id="mon-targets"><div class="state">Loading…</div></div>
+      <div id="mon-check-detail"></div>
+    </div>
+    <div class="panel">
+      <h2>Monitoring change alerts</h2>
+      <div id="mon-alerts"><div class="state">Loading…</div></div>
+    </div>
   </section>
 
   <!-- REVIEWS & FEEDBACK (STAGE 14) -->

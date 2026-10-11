@@ -110,6 +110,20 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434/v1"
     ollama_model: str = "llama3"
 
+    # Evidence network resolvers (Stage 5 optional enrichment)
+    evidence_enable_live_resolvers: bool = False
+    evidence_dns_timeout_seconds: float = 2.0
+    evidence_rdap_timeout_seconds: float = 3.0
+    evidence_rdap_bootstrap_url: str = "https://rdap.org/domain/"
+    evidence_enable_redirects: bool = False
+    evidence_redirect_max_hops: int = 5
+    evidence_redirect_timeout_seconds: float = 3.0
+
+    # Bounded in-process monitoring scheduler; provider checks remain opt-in.
+    monitoring_scheduler_enabled: bool = False
+    monitoring_scheduler_poll_seconds: float = 5.0
+    monitoring_scheduler_batch_size: int = 10
+
     @property
     def database_url(self) -> URL:
         """Build SQLAlchemy URL from explicit DATABASE_URL or POSTGRES_* settings."""

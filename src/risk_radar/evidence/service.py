@@ -19,20 +19,22 @@ from app.schemas.evidence import AnalyzerResult
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from risk_radar.evidence.application import ApplicationListingAnalyzer
 from risk_radar.evidence.base import utcnow
 from risk_radar.evidence.brand_profile import BrandProfileAnalyzer
 from risk_radar.evidence.image_text import ImageAnalyzer, TextAnalyzer
 from risk_radar.evidence.url_domain import UrlDomainAnalyzer
 from risk_radar.evidence.vision import VisionProvider
 
-AnalyzerName = Literal["url", "brand_profile", "text", "image"]
+AnalyzerName = Literal["url", "brand_profile", "text", "image", "application"]
 
 
 class EvidenceRequest(BaseModel):
     """One candidate to analyze across the configured analyzers."""
 
     target: str = Field(min_length=1, max_length=2048)
-    kind: Literal["auto", "domain", "handle", "name"] = "auto"
+    brand_id: int | None = Field(default=None, gt=0)
+    kind: Literal["auto", "domain", "handle", "name", "application"] = "auto"
     text: str | None = Field(default=None, max_length=20000)
     image_b64: str | None = None
     input_type: str = "url"
@@ -75,6 +77,7 @@ class EvidenceEngine:
         text: TextAnalyzer | None = None,
         image: ImageAnalyzer | None = None,
         vision: VisionProvider | None = None,
+        application: ApplicationListingAnalyzer | None = None,
     ) -> None:
         self._url = url or UrlDomainAnalyzer()
         self._brand = brand or BrandProfileAnalyzer()
@@ -82,6 +85,7 @@ class EvidenceEngine:
         # Image analysis is optional: a vision provider is used when configured,
         # otherwise the analyzer reports an explicit unavailable status.
         self._image = image or ImageAnalyzer(vision=vision)
+        self._application = application or ApplicationListingAnalyzer()
 
     def analyze(self, db: Session, request: EvidenceRequest) -> EvidenceAnalysisResult:
         """Analyze one candidate; analyzer errors never abort the run."""
@@ -110,6 +114,7 @@ class EvidenceEngine:
                             kind=request.kind,
                             input_type=request.input_type,
                             investigation_id=iid,
+                            brand_id=request.brand_id,
                         )
                     )
                 elif name == "text":
@@ -127,6 +132,16 @@ class EvidenceEngine:
                             image_bytes,
                             input_type=request.input_type,
                             investigation_id=iid,
+                        )
+                    )
+                elif name == "application":
+                    results.append(
+                        self._application.analyze(
+                            db,
+                            request.target,
+                            input_type=request.input_type,
+                            investigation_id=iid,
+                            brand_id=request.brand_id,
                         )
                     )
             except Exception as exc:  # noqa: BLE001 - isolate analyzer failures

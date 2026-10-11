@@ -32,7 +32,7 @@ class CaseCreate(BaseModel):
 
     title: str = Field(min_length=1, max_length=255)
     target: str = Field(min_length=1, max_length=2048)
-    kind: Literal["auto", "domain", "handle", "name"] = "auto"
+    kind: Literal["auto", "domain", "handle", "name", "application"] = "auto"
     # Optional stage-results snapshot (already-computed evidence/risk/etc).
     snapshot: dict | None = None
     note: str | None = Field(default=None, max_length=4000)
