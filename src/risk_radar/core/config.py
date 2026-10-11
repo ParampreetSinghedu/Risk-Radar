@@ -1,10 +1,58 @@
 """Environment-backed application settings."""
 
+import re
+import urllib.parse
 from functools import lru_cache
 
-from pydantic import SecretStr
+from pydantic import AliasChoices, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from sqlalchemy.engine import URL
+from sqlalchemy.engine import URL, make_url
+
+
+def normalize_database_url(raw: str | URL) -> URL:
+    """Normalize a database connection URL for SQLAlchemy and the psycopg v3 driver.
+
+    - Converts postgres:// and postgresql:// schemes to postgresql+psycopg://.
+    - Preserves postgresql+psycopg://, sqlite://, and any other valid dialect schemes.
+    - Safely percent-encodes unencoded special characters in username/password credentials.
+    - Preserves Supabase pooler host, port, database, and query parameters (such as sslmode).
+    """
+    if isinstance(raw, URL):
+        return raw
+
+    raw_str = raw.strip()
+    if not raw_str:
+        raise ValueError("Database URL cannot be empty")
+
+    match = re.match(
+        r"^(postgres|postgresql|postgresql\+psycopg)://(.*)$",
+        raw_str,
+        re.IGNORECASE,
+    )
+    if match:
+        rest = match.group(2)
+        # Match user credentials, host (including Supabase pooler), port, db, and query
+        m = re.search(r"@([a-zA-Z0-9.\-]+(?::\d+)?)(/[^?#]*)?(\?[^#]*)?$", rest)
+        if m:
+            host_with_port = m.group(1)
+            db_path = m.group(2) or ""
+            query_str = m.group(3) or ""
+            userinfo = rest[: m.start()]
+            if ":" in userinfo:
+                user, pwd = userinfo.split(":", 1)
+                user_enc = urllib.parse.quote(urllib.parse.unquote(user), safe="")
+                pwd_enc = urllib.parse.quote(urllib.parse.unquote(pwd), safe="")
+                userinfo_str = f"{user_enc}:{pwd_enc}@"
+            elif userinfo:
+                user_enc = urllib.parse.quote(urllib.parse.unquote(userinfo), safe="")
+                userinfo_str = f"{user_enc}@"
+            else:
+                userinfo_str = ""
+            raw_str = f"postgresql+psycopg://{userinfo_str}{host_with_port}{db_path}{query_str}"
+        else:
+            raw_str = f"postgresql+psycopg://{rest}"
+
+    return make_url(raw_str)
 
 
 class Settings(BaseSettings):
@@ -14,11 +62,18 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        populate_by_name=True,
         extra="ignore",
     )
 
     app_name: str = "Risk Radar API"
     app_environment: str = "local"
+
+    # Explicit database connection URL (takes precedence over POSTGRES_* settings)
+    database_url_env: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("database_url", "database_url_env"),
+    )
 
     postgres_host: str = "localhost"
     postgres_port: int = 5432
@@ -47,7 +102,9 @@ class Settings(BaseSettings):
 
     @property
     def database_url(self) -> URL:
-        """Build a safely escaped SQLAlchemy URL from PostgreSQL settings."""
+        """Build SQLAlchemy URL from explicit DATABASE_URL or POSTGRES_* settings."""
+        if self.database_url_env and self.database_url_env.strip():
+            return normalize_database_url(self.database_url_env)
         return URL.create(
             drivername="postgresql+psycopg",
             username=self.postgres_user,

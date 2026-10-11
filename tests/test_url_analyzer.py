@@ -1,4 +1,3 @@
-
 from app.analyzers.url_analyzer import URLAnalysisInput, analyze_url
 
 

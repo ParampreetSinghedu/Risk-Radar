@@ -144,3 +144,32 @@ class CaseEvent(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )
+
+
+class ReviewVerdict(StrEnum):
+    """Supported analyst review verdicts (Stage 14)."""
+
+    MALICIOUS = "malicious"
+    BENIGN = "benign"
+    SUSPICIOUS = "suspicious"
+
+
+class HumanReview(Base):
+    """Audited human analyst review verdict and feedback loop (Stage 14)."""
+
+    __tablename__ = "human_reviews"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    case_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("cases.id"), nullable=True, index=True
+    )
+    target: Mapped[str] = mapped_column(Text, nullable=False)
+    verdict: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    analyst: Mapped[str] = mapped_column(String(64), nullable=False, default="analyst")
+    tags: Mapped[str | None] = mapped_column(Text, nullable=True)
+    features_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    label: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )

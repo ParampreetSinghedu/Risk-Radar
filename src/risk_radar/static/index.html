@@ -77,13 +77,18 @@
     <h1>Risk Radar</h1>
     <div class="brand-sub">Multistage brand-impersonation triage</div>
   </div>
-  <nav id="nav">
-    <button data-view="dashboard" class="active">Dashboard</button>
-    <button data-view="submit">Submit Evidence</button>
-    <button data-view="investigate">Investigate</button>
-    <button data-view="cases">Cases</button>
-    <button data-view="alerts">Alerts</button>
-  </nav>
+  <div style="display:flex; align-items:center; gap:12px;">
+    <button class="btn secondary sm" id="seed-demo-btn" style="margin:0; border-color:var(--accent);">⚡ Seed Demo Data</button>
+    <nav id="nav">
+      <button data-view="dashboard" class="active">Dashboard</button>
+      <button data-view="submit">Submit Evidence</button>
+      <button data-view="investigate">Investigate</button>
+      <button data-view="cases">Cases</button>
+      <button data-view="alerts">Alerts</button>
+      <button data-view="reviews">Reviews &amp; Feedback</button>
+      <button data-view="evaluation">Evaluation</button>
+    </nav>
+  </div>
 </header>
 <main>
   <div id="flash" class="flash"></div>
@@ -173,6 +178,56 @@
       <div id="alerts-list"><div class="state">Loading…</div></div>
     </div>
     <div class="panel" id="report-panel" style="display:none"></div>
+  </section>
+
+  <!-- REVIEWS & FEEDBACK (STAGE 14) -->
+  <section id="view-reviews" class="view">
+    <div class="split">
+      <div class="panel">
+        <h2>Submit Human Review Verdict</h2>
+        <p class="muted" style="font-size:13px">Record an audited analyst verdict with mandatory reasoning. Creates training feedback labels for Stage 8 ML retraining.</p>
+        <label>Target URL / Domain</label>
+        <input type="text" id="rev-target" placeholder="https://suspicious.example.com" />
+        <label>Case ID (Optional)</label>
+        <input type="text" id="rev-case-id" placeholder="Optional Case #" />
+        <label>Verdict</label>
+        <select id="rev-verdict">
+          <option value="malicious">Malicious (Confirmed impersonation)</option>
+          <option value="benign">Benign (Legitimate / False Positive)</option>
+          <option value="suspicious">Suspicious (Needs Monitoring)</option>
+        </select>
+        <label>Mandatory Reasoning</label>
+        <textarea id="rev-reason" placeholder="Detailed analyst justification for this verdict (required)"></textarea>
+        <label>Analyst Identifier</label>
+        <input type="text" id="rev-analyst" value="senior_analyst" />
+        <button class="btn" id="rev-btn">Record Verdict &amp; Feedback</button>
+      </div>
+      <div class="panel">
+        <h2>ML Feedback Labels</h2>
+        <p class="muted" style="font-size:13px">Labels retrieved from human analyst verdicts formatted for model retraining.</p>
+        <div id="feedback-summary" class="muted" style="margin-bottom:10px;">Loading…</div>
+        <button class="btn secondary sm" id="retrain-btn">Trigger Retraining with Labels</button>
+        <div id="retrain-result"></div>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Review Audit Trail</h2>
+      <div id="reviews-list"><div class="state">Loading…</div></div>
+    </div>
+  </section>
+
+  <!-- EVALUATION (STAGE 15) -->
+  <section id="view-evaluation" class="view">
+    <div class="panel">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <div>
+          <h2>Evaluation Benchmark (Stage 15)</h2>
+          <p class="muted" style="font-size:13px; margin:4px 0 0;">Offline capability evaluation comparing gate decisions and rule indicators across benchmark samples.</p>
+        </div>
+        <button class="btn" id="run-bench-btn" style="margin:0;">Run Benchmark</button>
+      </div>
+      <div id="bench-result" style="margin-top:14px;"><div class="state">Click "Run Benchmark" to execute evaluation.</div></div>
+    </div>
   </section>
 </main>
 <script src="/app.js"></script>

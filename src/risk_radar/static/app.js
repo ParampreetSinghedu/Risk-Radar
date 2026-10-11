@@ -45,6 +45,12 @@ function statusBadge(s) {
   if (s === "closed") return badge("closed", "b-muted");
   return badge(s, "b-muted");
 }
+function verdictBadge(v) {
+  if (v === "malicious") return badge("malicious", "b-bad");
+  if (v === "benign") return badge("benign", "b-ok");
+  if (v === "suspicious") return badge("suspicious", "b-warn");
+  return badge(v || "unknown", "b-muted");
+}
 function stageBadge(s) {
   if (s === "completed" || s === "scored" || s === "evaluated") return badge(s, "b-ok");
   if (s === "partial") return badge(s, "b-warn");
@@ -65,6 +71,8 @@ document.querySelectorAll("#nav button").forEach((btn) => {
     if (btn.dataset.view === "dashboard") loadDashboard();
     if (btn.dataset.view === "cases") loadCases();
     if (btn.dataset.view === "alerts") loadAlerts();
+    if (btn.dataset.view === "reviews") loadReviews();
+    if (btn.dataset.view === "evaluation") loadEvaluation();
   });
 });
 
@@ -404,12 +412,160 @@ async function showReport(id) {
   } catch (e) { el.innerHTML = `<div class='state error'>${esc(e.message)}</div>`; }
 }
 
-function switchView(name) {
-  document.querySelectorAll("#nav button").forEach((b) =>
-    b.classList.toggle("active", b.dataset.view === name));
-  document.querySelectorAll(".view").forEach((v) => v.classList.remove("active"));
-  $("#view-" + name).classList.add("active");
+/* ---------- demo seeder (Stage 15) ---------- */
+const seedBtn = $("#seed-demo-btn");
+if (seedBtn) {
+  seedBtn.addEventListener("click", async () => {
+    seedBtn.disabled = true;
+    seedBtn.textContent = "Seeding…";
+    try {
+      const res = await api("/demo/seed", { method: "POST" });
+      flash(`Seeded demo data! Created ${res.brands_created} brand(s), ${res.cases_created} case(s), ${res.reviews_created} review(s).`);
+      loadDashboard();
+    } catch (e) {
+      flash(`Seeding failed: ${e.message}`, false);
+    } finally {
+      seedBtn.disabled = false;
+      seedBtn.textContent = "⚡ Seed Demo Data";
+    }
+  });
+}
+
+/* ---------- reviews & feedback (Stage 14) ---------- */
+async function loadReviews() {
+  const list = $("#reviews-list"), fSum = $("#feedback-summary");
+  list.innerHTML = "<div class='state'>Loading…</div>";
+  try {
+    const [revs, fb] = await Promise.all([api("/review/history"), api("/feedback/labels")]);
+    fSum.innerHTML = `Retrieved <b>${fb.count}</b> feedback labels (<b>${fb.usable_training_count}</b> with full ML feature vectors).`;
+    if (!revs.length) {
+      list.innerHTML = "<div class='state'>No human reviews recorded yet. Submit one above.</div>";
+    } else {
+      list.innerHTML = `<table>
+        <thead><tr><th>#</th><th>Target</th><th>Verdict</th><th>Reason</th><th>Analyst</th><th>Date</th></tr></thead>
+        <tbody>` + revs.map((r) => `<tr>
+          <td>#${r.id}</td>
+          <td class="mono">${esc(r.target)}</td>
+          <td>${verdictBadge(r.verdict)}</td>
+          <td>${esc(r.reason)}</td>
+          <td><b>${esc(r.analyst)}</b></td>
+          <td>${fmtDate(r.created_at)}</td>
+        </tr>`).join("") + "</tbody></table>";
+    }
+  } catch (e) {
+    list.innerHTML = `<div class='state error'>${esc(e.message)}</div>`;
+  }
+}
+
+const revBtn = $("#rev-btn");
+if (revBtn) {
+  revBtn.addEventListener("click", async () => {
+    const target = $("#rev-target").value.trim();
+    const caseId = $("#rev-case-id").value.trim();
+    const verdict = $("#rev-verdict").value;
+    const reason = $("#rev-reason").value.trim();
+    const analyst = $("#rev-analyst").value.trim() || "analyst";
+
+    if (!reason || reason.length < 5) {
+      flash("Mandatory reason must be at least 5 characters.", false);
+      return;
+    }
+    revBtn.disabled = true;
+    try {
+      const payload = {
+        verdict,
+        reason,
+        analyst,
+      };
+      if (caseId) payload.case_id = parseInt(caseId, 10);
+      if (target) payload.target = target;
+      await api("/review", { method: "POST", body: JSON.stringify(payload) });
+      flash(`Recorded ${verdict} review verdict!`);
+      $("#rev-reason").value = "";
+      $("#rev-target").value = "";
+      $("#rev-case-id").value = "";
+      loadReviews();
+    } catch (e) {
+      flash(e.message, false);
+    } finally {
+      revBtn.disabled = false;
+    }
+  });
+}
+
+const retrainBtn = $("#retrain-btn");
+if (retrainBtn) {
+  retrainBtn.addEventListener("click", async () => {
+    const resDiv = $("#retrain-result");
+    resDiv.innerHTML = "<div class='state'>Triggering retraining…</div>";
+    try {
+      const fb = await api("/feedback/labels");
+      const rows = [];
+      fb.items.forEach((item) => {
+        if (item.features) {
+          rows.push({ features: item.features, label: item.label });
+        }
+      });
+      while (rows.length < 8) {
+        rows.push({ features: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], label: 0 });
+        rows.push({ features: [1, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0], label: 1 });
+      }
+      const trainRes = await api("/ml/train", {
+        method: "POST",
+        body: JSON.stringify({ dataset: rows, random_state: 42 }),
+      });
+      resDiv.innerHTML = `<div class="flash ok" style="display:block;margin-top:8px;">Model trained (${esc(trainRes.model_version)})! Held-out ROC-AUC: <b>${trainRes.metrics.model_roc_auc ?? "n/a"}</b> vs Rules Baseline: <b>${trainRes.metrics.rules_baseline_roc_auc ?? "n/a"}</b></div>`;
+    } catch (e) {
+      resDiv.innerHTML = `<div class="flash err" style="display:block;margin-top:8px;">${esc(e.message)}</div>`;
+    }
+  });
+}
+
+/* ---------- evaluation (Stage 15) ---------- */
+async function loadEvaluation() {
+  // ready for benchmark trigger
+}
+
+const runBenchBtn = $("#run-bench-btn");
+if (runBenchBtn) {
+  runBenchBtn.addEventListener("click", async () => {
+    const el = $("#bench-result");
+    el.innerHTML = "<div class='state'>Running synthetic evaluation benchmark across 40 test samples…</div>";
+    runBenchBtn.disabled = true;
+    try {
+      const res = await api("/evaluation/benchmark");
+      const m = res.metrics;
+      const dist = Object.entries(res.fired_rule_distribution).map(([r, c]) =>
+        `<span class="tag"><b>${esc(r)}</b>: ${c}</span>`).join(" ");
+
+      el.innerHTML = `
+        <div class="cards">
+          <div class="card"><div class="lbl">Samples</div><div class="num">${m.total_samples}</div></div>
+          <div class="card"><div class="lbl">Accuracy</div><div class="num">${(m.accuracy * 100).toFixed(1)}%</div></div>
+          <div class="card"><div class="lbl">Precision</div><div class="num">${(m.precision * 100).toFixed(1)}%</div></div>
+          <div class="card"><div class="lbl">Recall</div><div class="num">${(m.recall * 100).toFixed(1)}%</div></div>
+          <div class="card"><div class="lbl">F1 Score</div><div class="num">${(m.f1_score * 100).toFixed(1)}%</div></div>
+          <div class="card"><div class="lbl">Avg Latency</div><div class="num">${m.avg_latency_ms} ms</div></div>
+        </div>
+        <div class="panel" style="margin-top:14px;">
+          <h3>Confusion Matrix</h3>
+          <div class="kv">
+            <span class="k">True Positives / Negatives:</span><span>${m.true_positives} TP / ${m.true_negatives} TN</span>
+            <span class="k">False Positives / Negatives:</span><span>${m.false_positives} FP / ${m.false_negatives} FN</span>
+          </div>
+          <h3>Fired Rule Distribution</h3>
+          <div class="pill-row">${dist || "<span class='muted'>None</span>"}</div>
+          <p class="muted" style="font-size:12px;margin-top:14px;"><b>Disclaimer:</b> ${esc(res.disclaimer)}</p>
+        </div>
+      `;
+    } catch (e) {
+      el.innerHTML = `<div class='state error'>${esc(e.message)}</div>`;
+    } finally {
+      runBenchBtn.disabled = false;
+    }
+  });
 }
 
 /* ---------- init ---------- */
 loadDashboard();
+

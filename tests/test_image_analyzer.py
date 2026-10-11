@@ -1,4 +1,3 @@
-
 from app.analyzers.image_analyzer import (
     ImageAnalysisInput,
     analyze_image,
