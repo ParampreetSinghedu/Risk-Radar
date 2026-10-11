@@ -241,9 +241,11 @@ function renderRisk(data) {
       <div class="k">Detection risk</div><div>${d.score ?? "—"} (rule ${d.rule_risk ?? "—"} / ml ${d.ml_risk ?? "n/a"})</div>
       <div class="k">Business impact</div><div>${imp.status === "available" ? imp.score : badge("unavailable", "b-muted")}</div>
       <div class="k">Formula</div><div class="mono" style="font-size:11.5px">${esc(data.overall_formula || "")}</div>
+      ${(data.input_quality || []).length ? `<div class="k">Evidence coverage</div><div class="mono" style="font-size:11.5px">${esc(data.input_quality.join(" | "))}</div>` : ""}
     </div>
     ${sigs ? `<h3>Contributing signals</h3><ul class="list">${sigs}</ul>` : ""}
-    ${(imp.missing_data || []).length ? `<h3>Missing impact data</h3><ul class="list">${imp.missing_data.map((m) => `<li class="muted">${esc(m)}</li>`).join("")}</ul>` : ""}`;
+    ${(imp.missing_data || []).length ? `<h3>Missing impact data</h3><ul class="list">${imp.missing_data.map((m) => `<li class="muted">${esc(m)}</li>`).join("")}</ul>` : ""}
+    ${(data.limitations || []).length ? `<h3>Assessment notes &amp; limitations</h3><ul class="list">${data.limitations.map((l) => `<li class="muted" style="font-size:12px">${esc(l)}</li>`).join("")}</ul>` : ""}`;
 }
 
 function renderRag(data) {

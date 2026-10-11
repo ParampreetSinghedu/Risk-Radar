@@ -164,7 +164,7 @@ class RAGAnalysisEngine:
                 limitations=limitations
                 + [
                     "LLM provider is not configured (set LLM_PROVIDER and "
-                    "ANTHROPIC_API_KEY): documents were retrieved but no claims "
+                    "APINEX_API_KEY or ANTHROPIC_API_KEY): documents were retrieved but no claims "
                     "were generated"
                 ],
                 errors=errors,

@@ -137,7 +137,7 @@ class InvestigatorService:
                 limitations=limitations
                 + [
                     "LLM provider is not configured (set LLM_PROVIDER and "
-                    "ANTHROPIC_API_KEY): no findings were generated"
+                    "APINEX_API_KEY or ANTHROPIC_API_KEY): no findings were generated"
                 ],
                 errors=errors,
             )

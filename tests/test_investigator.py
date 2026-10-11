@@ -326,3 +326,149 @@ def test_invalid_requests_rejected(client: TestClient) -> None:
         json={"target": "http://x.example/", "analysis": {"analyzer_type": "url"}},
     )
     assert bad.status_code == 422
+
+
+# --- Phase 1 & 2: APInex and Fallback Provider unit tests -------------------
+
+
+def test_openai_compatible_provider_success() -> None:
+    """OpenAICompatibleProvider parses Chat Completions JSON output correctly."""
+    from unittest.mock import MagicMock
+
+    from risk_radar.investigator.llm import OpenAICompatibleProvider
+
+    mock_client = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    content_json = '{"findings": [{"finding": "threat", "citations": ["target"]}]}'
+    mock_resp.json.return_value = {"choices": [{"message": {"content": content_json}}]}
+    mock_client.post.return_value = mock_resp
+
+    provider = OpenAICompatibleProvider(
+        name="apinex",
+        base_url="https://api.apinex.bond/v1",
+        api_key="test-key",
+        model="free/deepseek-v4-flash-0731",
+        client=mock_client,
+    )
+    output = provider.complete("system prompt", "user query")
+    assert "threat" in output
+    mock_client.post.assert_called_once()
+    args, kwargs = mock_client.post.call_args
+    assert args[0] == "https://api.apinex.bond/v1/chat/completions"
+    assert kwargs["headers"]["authorization"] == "Bearer test-key"
+    assert kwargs["json"]["model"] == "free/deepseek-v4-flash-0731"
+
+
+def test_openai_compatible_provider_authentication_error() -> None:
+    """Status 401 raises a permanent ProviderError."""
+    from unittest.mock import MagicMock
+
+    import pytest
+
+    from risk_radar.investigator.llm import OpenAICompatibleProvider, ProviderError
+
+    mock_client = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.status_code = 401
+    mock_client.post.return_value = mock_resp
+
+    provider = OpenAICompatibleProvider(
+        name="apinex",
+        base_url="https://api.apinex.bond/v1",
+        api_key="invalid-key",
+        model="free/deepseek-v4-flash-0731",
+        client=mock_client,
+    )
+    with pytest.raises(ProviderError) as exc_info:
+        provider.complete("sys", "user")
+    assert "authentication failed" in str(exc_info.value)
+    assert exc_info.value.is_permanent is True
+
+
+def test_openai_compatible_provider_rate_limit_and_server_error() -> None:
+    """Status 429 and 500 raise transient ProviderErrors."""
+    from unittest.mock import MagicMock
+
+    import pytest
+
+    from risk_radar.investigator.llm import OpenAICompatibleProvider, ProviderError
+
+    mock_client = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.status_code = 429
+    mock_client.post.return_value = mock_resp
+
+    provider = OpenAICompatibleProvider(
+        name="apinex",
+        base_url="https://api.apinex.bond/v1",
+        api_key="key",
+        model="model",
+        client=mock_client,
+    )
+    with pytest.raises(ProviderError) as exc_info:
+        provider.complete("sys", "user")
+    assert "rate limit or quota" in str(exc_info.value)
+    assert exc_info.value.is_permanent is False
+
+
+def test_fallback_provider_cascades_to_second_provider() -> None:
+    """When the first provider fails, FallbackProvider smoothly invokes the second."""
+    from risk_radar.investigator.llm import FallbackProvider, ProviderError
+
+    p1 = FakeProvider(error=ProviderError("apinex quota exceeded"))
+    p1.name = "apinex"
+    p2 = FakeProvider(response='{"findings": [{"finding": "recovered", "citations": ["target"]}]}')
+    p2.name = "claude"
+
+    fallback = FallbackProvider([p1, p2])
+    res = fallback.complete("system", "user")
+    assert "recovered" in res
+    assert fallback.name == "claude"
+    assert len(p2.calls) == 1
+
+
+def test_fallback_provider_all_fail_reports_honest_status() -> None:
+    """When all providers fail, a comprehensive ProviderError is raised."""
+    import pytest
+
+    from risk_radar.investigator.llm import FallbackProvider, ProviderError
+
+    p1 = FakeProvider(error=ProviderError("p1 timeout"))
+    p1.name = "p1"
+    p2 = FakeProvider(error=ProviderError("p2 auth error"))
+    p2.name = "p2"
+
+    fallback = FallbackProvider([p1, p2])
+    with pytest.raises(ProviderError) as exc_info:
+        fallback.complete("system", "user")
+    assert "all providers failed" in str(exc_info.value)
+    assert "p1: p1 timeout" in str(exc_info.value)
+    assert "p2: p2 auth error" in str(exc_info.value)
+
+
+def test_get_provider_configuration_resolution() -> None:
+    """get_provider builds APInex when configured, respects fallbacks, and ignores empty."""
+    from pydantic import SecretStr
+
+    from risk_radar.core.config import Settings
+    from risk_radar.investigator.llm import FallbackProvider, OpenAICompatibleProvider, get_provider
+
+    s = Settings(
+        llm_provider="apinex",
+        apinex_api_key=SecretStr("sk-test"),
+        apinex_model="free/deepseek-v4-flash-0731",
+    )
+    p = get_provider(s)
+    assert isinstance(p, OpenAICompatibleProvider)
+    assert p.name == "apinex"
+
+    # Multi-provider fallback resolution
+    s_fallback = Settings(
+        llm_provider="apinex",
+        llm_fallback_providers="claude",
+        apinex_api_key=SecretStr("sk-apinex"),
+        anthropic_api_key=SecretStr("sk-claude"),
+    )
+    p_fallback = get_provider(s_fallback)
+    assert isinstance(p_fallback, FallbackProvider)

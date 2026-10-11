@@ -95,10 +95,20 @@ class Settings(BaseSettings):
     # Discovery feeds (Stage 3)
     urlhaus_auth_key: SecretStr | None = None
 
-    # LLM investigator (Stage 9)
+    # LLM investigator & RAG analysis (Stages 9 & 12)
     llm_provider: str = ""
     llm_model: str = "claude-3-5-haiku-latest"
+    llm_fallback_providers: str = ""
     anthropic_api_key: SecretStr | None = None
+    apinex_api_key: SecretStr | None = None
+    apinex_base_url: str = "https://api.apinex.bond/v1"
+    apinex_model: str = "free/deepseek-v4-flash-0731"
+    groq_api_key: SecretStr | None = None
+    groq_model: str = "llama-3.3-70b-versatile"
+    openrouter_api_key: SecretStr | None = None
+    openrouter_model: str = "deepseek/deepseek-chat"
+    ollama_base_url: str = "http://localhost:11434/v1"
+    ollama_model: str = "llama3"
 
     @property
     def database_url(self) -> URL:

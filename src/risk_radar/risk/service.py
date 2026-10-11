@@ -235,12 +235,24 @@ class RiskImpactEngine:
         detection, detection_limitations, input_quality = self._detection_risk(evaluation, ref, ml)
         impact = self._business_impact(db, request, decision)
 
+        limitations = list(detection_limitations)
+        if request.analysis is not None:
+            input_quality.append(f"analyzer={request.analysis.analyzer_type}")
+            input_quality.append(f"analyzer_status={request.analysis.status}")
+            if request.analysis.limitations:
+                limitations.extend(request.analysis.limitations)
+        else:
+            input_quality.append("analyzers_run=0")
+            limitations.append(
+                "no analyzer evidence supplied: detection relies strictly on "
+                "candidate string and stored records"
+            )
+
         # Combine with neutral multiplier when impact data is missing.
         multiplier = impact.score if (impact and impact.score is not None) else 1.0
         overall = round((detection.score or 0.0) * multiplier, 4)
         overall = max(0.0, min(1.0, overall))
 
-        limitations = list(detection_limitations)
         if impact is not None:
             limitations.extend(impact.limitations)
         limitations.append(
@@ -317,7 +329,7 @@ class RiskImpactEngine:
             weights=weights,
             signals=signals,
             limitations=["rule_risk is a severity-weighted mean of matched findings"]
-            + rule_limits
+            + limitations
             + ([ml_semantics] if ml_semantics else []),
         )
         return detection, limitations, input_quality

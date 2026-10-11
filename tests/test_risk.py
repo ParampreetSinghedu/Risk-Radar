@@ -248,3 +248,56 @@ def test_engine_reuses_rule_evaluation_shape(client):
     evaluation = RuleEngine().evaluate(db=session, target="http://192.0.2.10/phish")
     assert isinstance(evaluation, RuleEvaluation)
     assert evaluation.status == "evaluated"
+
+
+# --- Phase 4: Missing data, confidence handling, partial analyzer failures ---
+
+
+def test_risk_scoring_with_no_analyzers_reports_evidence_limitations(client):
+    """When no analyzers are supplied, risk score is computed but limitations reflect it."""
+    session = _session_from_client(client)
+    engine = RiskImpactEngine()
+    request = RiskImpactRequest(target="https://unknown-example.org/portal")
+    score = engine.score(session, request)
+
+    assert score.status == "scored"
+    assert "analyzers_run=0" in score.input_quality
+    assert any("no analyzer evidence supplied" in lim for lim in score.limitations)
+    # Target has no matched rules and no impact data -> detection risk 0.0, multiplier 1.0
+    assert score.detection_risk.score == 0.0
+    assert score.overall_score == 0.0
+
+
+def test_risk_scoring_with_partial_analyzer_failures(client):
+    """When an analyzer reports partial failure/limitations, they propagate to score limitations."""
+    from risk_radar.gate.contracts import AnalyzerEvidence, SourceReference
+
+    session = _session_from_client(client)
+    engine = RiskImpactEngine()
+    evidence = AnalyzerEvidence(
+        analyzer_type="url",
+        status="partial",
+        source_reference=SourceReference(
+            input_id="sub:1", kind="url", locator="https://partial-example.org"
+        ),
+        limitations=["RDAP lookup timed out: domain age unknown"],
+        errors=[{"stage": "rdap", "message": "timeout"}],
+    )
+    request = RiskImpactRequest(target="https://partial-example.org", analysis=evidence)
+    score = engine.score(session, request)
+
+    assert score.status == "scored"
+    assert "analyzer=url" in score.input_quality
+    assert "analyzer_status=partial" in score.input_quality
+    assert any("RDAP" in lim for lim in score.limitations)
+
+
+def test_missing_ml_service_does_not_invent_model_confidence(client):
+    """When ML service is omitted, weight is transferred to rules; no score is fabricated."""
+    session = _session_from_client(client)
+    engine = RiskImpactEngine(ml_service=None)
+    score = engine.score(session, RiskImpactRequest(target="http://192.0.2.10/test"))
+
+    assert score.detection_risk.ml_risk is None
+    assert score.detection_risk.weights == {"rule": 1.0}
+    assert any("no ML service supplied" in lim for lim in score.detection_risk.limitations)
