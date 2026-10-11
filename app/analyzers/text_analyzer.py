@@ -1,0 +1,49 @@
+from uuid import uuid4
+
+from pydantic import BaseModel, Field
+
+from app.schemas.evidence import (
+    AnalyzerResult,
+    EvidenceRecord,
+    SourceReference,
+)
+
+
+class TextAnalysisInput(BaseModel):
+    investigation_id: str
+    input_id: str
+    submitted_text: str = Field(min_length=1)
+
+
+def analyze_text(data: TextAnalysisInput) -> AnalyzerResult:
+    source = SourceReference(
+        input_id=data.input_id,
+        kind="user_submission",
+        locator=f"text_input:{data.input_id}",
+    )
+
+    evidence = EvidenceRecord(
+        evidence_id=f"ev_{uuid4().hex[:8]}",
+        evidence_type="text_observation",
+        description="Text submitted for analysis.",
+        source_reference=source,
+        provenance={"source": "user_provided"},
+        limitations=[
+            "The submitted text has not been independently verified."
+        ],
+    )
+
+    return AnalyzerResult(
+        schema_version="1.0",
+        investigation_id=data.investigation_id,
+        analysis_id=f"ana_{uuid4().hex[:8]}",
+        analyzer_type="text",
+        input_type="text",
+        status="partial",
+        source_reference=source,
+        evidence=[evidence],
+        limitations=[
+            "The submitted text is recorded but not semantically analyzed.",
+            "No external fact-checking or threat detection was performed.",
+        ],
+    )
