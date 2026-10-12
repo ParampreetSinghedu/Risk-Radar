@@ -1,6 +1,8 @@
-# SentinelX / Risk Radar v4 — Multistage Brand-Impersonation Defense
+# SentinelX / Risk Radar — Evidence-led brand-risk investigation
 
-SentinelX / Risk Radar is an enterprise-grade, end-to-end brand-impersonation triage and defense platform that continuously discovers, collects, assesses, scores, and correlates threat evidence against official brand profiles. Built around a robust 17-stage modular pipeline, it enforces server-side official asset exclusions, explainable heuristic detections, machine learning prioritization, AI-assisted grounded investigation, audited human reviews, and automated triage reporting.
+SentinelX / Risk Radar is a prototype for investigating potential brand impersonation across submitted URLs, domains, social profiles, app listings, and screenshots. It combines registered-brand comparisons, provenance-bearing evidence, explainable rules, optional model-assisted prioritization, persisted cases, and an opt-in monitoring lifecycle. Provider availability depends on configuration; an adapter or offline test does not imply live source verification. Findings support analyst review and are not proof of maliciousness.
+
+The root route (`/`) is the user-facing introduction. The existing analyst dashboard is served at `/app` and `/dashboard`; the technical and verification overview is at `/project`.
 
 ---
 
@@ -118,8 +120,8 @@ This mode runs the entire stack using SQLite in local development without needin
    python -m uvicorn risk_radar.main:app --port 8000 --host 127.0.0.1
    ```
 
-5. **Open the Dashboard in your browser:**
-   Navigate to [http://localhost:8000](http://localhost:8000).
+5. **Open SentinelX in your browser:**
+   Navigate to [http://localhost:8000](http://localhost:8000) for the introduction, [http://localhost:8000/app](http://localhost:8000/app) for the analyst dashboard, or [http://localhost:8000/project](http://localhost:8000/project) for the technical overview.
 
 6. **Seed Demo Data with 1 Click:**
    Click the **⚡ Seed Demo Data** button in the dashboard header or run:
@@ -137,7 +139,9 @@ docker compose up --build
 ```
 | Service | Address |
 | :--- | :--- |
-| **Web Dashboard** | <http://localhost:8000/> |
+| **Introduction** | <http://localhost:8000/> |
+| **Web Dashboard** | <http://localhost:8000/app> |
+| **Technical Overview** | <http://localhost:8000/project> |
 | **API Health** | <http://localhost:8000/api/v1/health> |
 | **Interactive Docs** | <http://localhost:8000/docs> |
 | **MinIO Console** | <http://localhost:9001> |
@@ -160,8 +164,17 @@ All credentials and endpoints are read cleanly from environment variables or `.e
 | `REDIS_PORT` | `6379` | Redis server port. |
 | `MINIO_ENDPOINT` | `localhost:9000` | Object storage endpoint. |
 | `URLHAUS_AUTH_KEY` | *None* | Optional API key for high-frequency URLhaus querying. |
+| `BRAVE_SEARCH_API_KEY` | *None* | Optional Brave Search API subscription key for public web-result discovery and grounded search snippets. |
+| `BRAVE_SEARCH_TIMEOUT_SECONDS` | `8.0` | Brave Search request timeout, bounded by the application to 0.5–15 seconds. |
+| `SEARCH_PROVIDER` | `brave` | Selects exactly one hosted search adapter: `brave`, `tavily`, or `exa`. No hosted request is made unless the selected provider's key is configured. |
+| `TAVILY_API_KEY` | *None* | Optional Tavily search API key; used only when `SEARCH_PROVIDER=tavily`. |
+| `EXA_API_KEY` | *None* | Optional Exa search API key; used only when `SEARCH_PROVIDER=exa`. |
+| `SEARCH_PROVIDER_TIMEOUT_SECONDS` | `8.0` | Timeout for the selected Tavily or Exa search request, bounded to 0.5–15 seconds. |
 | `LLM_PROVIDER` | `""` | Optional LLM provider (`claude` or empty for graceful local fallback). |
 | `ANTHROPIC_API_KEY` | *None* | Optional API key for Claude investigation and vision parsing. |
+| `VISION_MODEL` | `claude-haiku-4-5-20251001` | Anthropic vision model ID, configured separately from the text LLM model. |
+
+For local optional search, copy `.env.example` to the Git-ignored `.env`, set `SEARCH_PROVIDER` to the provider you intend to use, and add only that provider's key (`BRAVE_SEARCH_API_KEY`, `TAVILY_API_KEY`, or `EXA_API_KEY`). To enable Claude vision, set `ANTHROPIC_API_KEY`; choose the image model with `VISION_MODEL`. The `GET /api/v1/providers/configuration` endpoint reports configured-key booleans and the selected search provider only; it never returns key values. No provider request is made by the configuration endpoint.
 
 ---
 

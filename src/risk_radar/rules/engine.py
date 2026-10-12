@@ -417,6 +417,37 @@ def rule_logo_publisher_mismatch(context: RuleContext) -> RuleFinding | RuleNote
     )
 
 
+def rule_embedded_identity_text(context: RuleContext) -> RuleFinding | RuleNote:
+    """Report URLs/handles extracted from supplied text or OCR without judging them."""
+    extracted: list[str] = []
+    for observation in context.observations:
+        if observation.get("kind") not in {"embedded_urls", "embedded_handles"}:
+            continue
+        value = observation.get("value")
+        if isinstance(value, list):
+            extracted.extend(str(item) for item in value[:10] if isinstance(item, str))
+    if not extracted:
+        return RuleNote(
+            rule_id="embedded_identity_text",
+            title="URLs or handles embedded in evidence",
+            status="not_matched",
+            reason="no URL or social handle was extracted from supplied text or image OCR",
+        )
+    return RuleFinding(
+        rule_id="embedded_identity_text",
+        title="URLs or handles embedded in evidence",
+        severity="informational",
+        reason=(
+            "text extraction found URL/handle strings that may warrant separate review; "
+            "extraction does not verify that a profile exists or a URL is reachable"
+        ),
+        evidence_refs=["analysis"],
+        observed_value=", ".join(dict.fromkeys(extracted))[:500],
+        confidence=1.0,
+        provenance={"method": "regex_text_or_ocr_extraction", "identity_verified": False},
+    )
+
+
 def rule_application_similarity(context: RuleContext) -> RuleFinding | RuleNote:
     """Compare extracted app identifiers with official application assets."""
     if context.kind != "application":
@@ -479,6 +510,7 @@ RULE_REGISTRY = [
     rule_suspicious_url_structure,
     rule_newly_registered_domain,
     rule_logo_publisher_mismatch,
+    rule_embedded_identity_text,
     rule_application_similarity,
 ]
 
@@ -567,6 +599,7 @@ class RuleEngine:
                 target=target,
                 kind=kind,
                 analysis=analysis,  # type: ignore[arg-type]
+                record_audit=False,
             )
         except Exception as exc:  # noqa: BLE001 - fail closed on any gate failure
             return RuleEvaluation(

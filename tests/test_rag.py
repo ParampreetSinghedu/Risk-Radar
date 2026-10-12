@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 
+from risk_radar.discovery.base import Candidate, CandidateType, ConnectorError
 from risk_radar.gate.service import ExclusionGate
 from risk_radar.investigator.llm import ProviderError
 from risk_radar.rag.contracts import RetrievedDocument
@@ -122,6 +123,56 @@ def test_retriever_deterministic_ranking(client):
     assert a == b
 
 
+def test_retriever_does_not_let_repeated_gate_audits_crowd_out_submission(client):
+    session = _session_from_client(client)
+    from risk_radar.db.models import ExclusionAuditLog, Submission
+
+    target = "https://phish.example.com/login"
+    session.add(
+        Submission(
+            submission_type="url",
+            source="test",
+            content=target,
+            content_hash="audit-crowding-test",
+        )
+    )
+    for i in range(5):
+        session.add(
+            ExclusionAuditLog(
+                input_reference=target,
+                decision="not_matched",
+                reason=f"no official match {i}",
+                alert_eligible=True,
+            )
+        )
+    session.commit()
+
+    docs = StoredEvidenceRetriever().retrieve(session, target)
+    assert any(doc.source_type == "submission" for doc in docs)
+    assert not any(doc.source_type == "audit_log" for doc in docs)
+
+
+def test_retriever_returns_only_latest_audit_when_no_substantive_evidence(client):
+    session = _session_from_client(client)
+    from risk_radar.db.models import ExclusionAuditLog
+
+    target = "https://audit-only.example.com"
+    for _ in range(5):
+        session.add(
+            ExclusionAuditLog(
+                input_reference=target,
+                decision="not_matched",
+                reason="no official match",
+                alert_eligible=True,
+            )
+        )
+    session.commit()
+
+    docs = StoredEvidenceRetriever().retrieve(session, target)
+    audit_docs = [doc for doc in docs if doc.source_type == "audit_log"]
+    assert len(audit_docs) == 1
+
+
 # --- provider unavailable / empty evidence ---------------------------------
 
 
@@ -141,6 +192,146 @@ def test_no_evidence_status_when_retrieval_empty(client):
     result = engine.analyze(session, RAGRequest(target="http://nothing.example.org"))
     assert result.status == "no_evidence"
     assert result.claims == []
+
+
+def test_web_search_snippet_can_ground_claim_but_is_not_page_content(client):
+    session = _session_from_client(client)
+    candidate = Candidate(
+        source="brave_search",
+        source_reference="https://press.example/report",
+        candidate_type=CandidateType.URL,
+        target="https://press.example/report",
+        metadata={
+            "title": "Acme report",
+            "snippet": "Search provider excerpt",
+            "content_kind": "search_snippet",
+            "page_content_retrieved": False,
+        },
+    )
+
+    class Search:
+        name = "brave_search"
+
+        def search(self, query):
+            assert query == "https://candidate.example/login"
+            return [candidate]
+
+    provider = FakeProvider(
+        json.dumps(
+            {
+                "risk_factors": [
+                    {
+                        "kind": "observed_fact",
+                        "text": "The provider snippet mentions the candidate.",
+                        "citations": [f"web_search:{candidate.candidate_id}"],
+                    }
+                ],
+                "uncertainties": [],
+                "recommended_next_actions": [],
+            }
+        )
+    )
+    result = RAGAnalysisEngine(
+        provider=provider,
+        retriever=FakeRetriever(),
+        research_connector=Search(),
+    ).analyze(session, RAGRequest(target="https://candidate.example/login"))
+
+    assert result.status == "completed"
+    document = result.retrieved_documents[0]
+    assert document.source_type == "web_search"
+    assert document.provenance["content_kind"] == "search_snippet"
+    assert document.provenance["page_content_retrieved"] is False
+    assert "page content was not retrieved" in document.content
+    assert result.claims[0].citations[0].doc_id == document.doc_id
+    assert document.doc_id in provider.calls[0]["user"]
+
+
+def test_web_search_provider_failure_does_not_claim_clean_or_disappeared_evidence(client):
+    session = _session_from_client(client)
+
+    class BrokenSearch:
+        name = "brave_search"
+
+        def search(self, query):
+            raise ConnectorError("brave_search: rate limited")
+
+    engine = RAGAnalysisEngine(
+        provider=FakeProvider("{}"),
+        retriever=FakeRetriever(docs=[_doc()]),
+        research_connector=BrokenSearch(),
+    )
+    result = engine.analyze(session, RAGRequest(target="http://bad.example.com"))
+    assert result.status == "partial"
+    assert result.retrieved_documents[0].source_type == "submission"
+    assert result.errors[0]["stage"] == "web_search"
+    assert any("rate limited" in limitation for limitation in result.limitations)
+
+
+def test_rag_api_returns_search_citation_and_case_snapshot(client, monkeypatch):
+    from risk_radar.api.v1 import rag as rag_api
+
+    candidate = Candidate(
+        source="brave_search",
+        source_reference="https://source.example/article",
+        candidate_type=CandidateType.URL,
+        target="https://source.example/article",
+        metadata={
+            "title": "Public report",
+            "snippet": "Provider supplied excerpt",
+            "content_kind": "search_snippet",
+            "page_content_retrieved": False,
+        },
+    )
+
+    class Search:
+        def __init__(self, **_kwargs):
+            pass
+
+        def search(self, query):
+            return [candidate]
+
+    provider = FakeProvider(
+        json.dumps(
+            {
+                "risk_factors": [
+                    {
+                        "kind": "observed_fact",
+                        "text": "A search excerpt was returned.",
+                        "citations": [f"web_search:{candidate.candidate_id}"],
+                    }
+                ],
+                "uncertainties": [],
+                "recommended_next_actions": [],
+            }
+        )
+    )
+    monkeypatch.setattr(rag_api, "configured_search_connector", lambda _settings: Search())
+    monkeypatch.setattr(rag_api, "get_provider", lambda _settings: provider)
+
+    response = client.post(
+        "/api/v1/rag/analyze",
+        json={"target": "candidate.example", "kind": "domain"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["retrieved_documents"][0]["source_type"] == "web_search"
+    assert body["retrieved_documents"][0]["provenance"]["page_content_retrieved"] is False
+    assert body["claims"][0]["citations"][0]["doc_id"] == body["retrieved_documents"][0]["doc_id"]
+
+    snapshot = {"rag": body}
+    case = client.post(
+        "/api/v1/cases",
+        json={
+            "title": "Search snippet review",
+            "target": "candidate.example",
+            "snapshot": snapshot,
+        },
+    )
+    assert case.status_code == 201
+    report = client.get(f"/api/v1/cases/{case.json()['id']}/report")
+    assert report.status_code == 200
+    assert report.json()["snapshot"] == snapshot
 
 
 # --- citation validation ---------------------------------------------------

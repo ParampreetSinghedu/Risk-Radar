@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from risk_radar.core.config import get_settings
 from risk_radar.db.session import get_db
+from risk_radar.discovery.service import configured_search_connector
 from risk_radar.investigator.llm import get_provider
 from risk_radar.rag.service import RAGAnalysis, RAGAnalysisEngine, RAGRequest
 
@@ -28,5 +29,7 @@ def analyze_rag(
     db: Annotated[Session, Depends(get_db)],
 ) -> RAGAnalysis:
     """Retrieve stored evidence and generate citation-validated claims."""
-    provider = get_provider(get_settings())
-    return RAGAnalysisEngine(provider=provider).analyze(db, payload)
+    settings = get_settings()
+    provider = get_provider(settings)
+    search = configured_search_connector(settings)
+    return RAGAnalysisEngine(provider=provider, research_connector=search).analyze(db, payload)

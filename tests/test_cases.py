@@ -187,6 +187,27 @@ def test_dashboard_aggregates_real_counts(client):
     assert len(body["recent_cases"]) == 3
 
 
+def test_created_case_is_retrievable_and_present_after_dashboard_refresh(client):
+    payload = {
+        "title": "Frontend workflow integration",
+        "target": "brand.example",
+        "snapshot": {"summary": {"status": "completed", "data": {"candidate": "brand.example"}}},
+    }
+    created = client.post("/api/v1/cases", json=payload)
+    assert created.status_code == 201
+    case_id = created.json()["id"]
+
+    listed = client.get("/api/v1/cases")
+    assert listed.status_code == 200
+    assert any(item["id"] == case_id for item in listed.json())
+    dashboard = client.get("/api/v1/dashboard")
+    assert dashboard.status_code == 200
+    assert any(item["id"] == case_id for item in dashboard.json()["recent_cases"])
+    refreshed = client.get(f"/api/v1/cases/{case_id}/report")
+    assert refreshed.status_code == 200
+    assert refreshed.json()["snapshot"] == payload["snapshot"]
+
+
 # --- alerts view ----------------------------------------------------------
 
 
@@ -211,7 +232,7 @@ def test_alerts_excludes_official_and_unverified(client):
 
 
 def test_dashboard_html_is_served(client):
-    r = client.get("/")
+    r = client.get("/app")
     assert r.status_code == 200
     assert "Risk Radar" in r.text
 
@@ -220,3 +241,11 @@ def test_app_js_is_served(client):
     r = client.get("/app.js")
     assert r.status_code == 200
     assert "api/v1" in r.text
+
+
+def test_summary_helper_is_served_before_frontend_app(client):
+    html = client.get("/app").text
+    helper = client.get("/investigation_summary.js")
+    assert helper.status_code == 200
+    assert html.index("/investigation_summary.js") < html.index("/app.js")
+    assert "renderInvestigationSummary" in client.get("/app.js").text

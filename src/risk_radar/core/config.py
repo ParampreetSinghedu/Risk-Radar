@@ -3,8 +3,9 @@
 import re
 import urllib.parse
 from functools import lru_cache
+from typing import Literal
 
-from pydantic import AliasChoices, Field, SecretStr
+from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import URL, make_url
 
@@ -94,10 +95,17 @@ class Settings(BaseSettings):
 
     # Discovery feeds (Stage 3)
     urlhaus_auth_key: SecretStr | None = None
+    brave_search_api_key: SecretStr | None = None
+    tavily_api_key: SecretStr | None = None
+    exa_api_key: SecretStr | None = None
+    search_provider: Literal["brave", "tavily", "exa"] = "brave"
+    brave_search_timeout_seconds: float = 8.0
+    search_provider_timeout_seconds: float = 8.0
 
     # LLM investigator & RAG analysis (Stages 9 & 12)
     llm_provider: str = ""
     llm_model: str = "claude-3-5-haiku-latest"
+    vision_model: str = "claude-haiku-4-5-20251001"
     llm_fallback_providers: str = ""
     anthropic_api_key: SecretStr | None = None
     apinex_api_key: SecretStr | None = None
@@ -123,6 +131,40 @@ class Settings(BaseSettings):
     monitoring_scheduler_enabled: bool = False
     monitoring_scheduler_poll_seconds: float = 5.0
     monitoring_scheduler_batch_size: int = 10
+
+    @field_validator(
+        "brave_search_api_key",
+        "tavily_api_key",
+        "exa_api_key",
+        "anthropic_api_key",
+        mode="before",
+    )
+    @classmethod
+    def blank_optional_keys_are_unconfigured(cls, value):
+        """Treat empty environment placeholders as absent, without exposing values."""
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @property
+    def provider_key_status(self) -> dict[str, bool]:
+        """Return configuration presence only; never return secret values."""
+        return {
+            "BRAVE_SEARCH_API_KEY": bool(
+                self.brave_search_api_key
+                and self.brave_search_api_key.get_secret_value().strip()
+            ),
+            "TAVILY_API_KEY": bool(
+                self.tavily_api_key and self.tavily_api_key.get_secret_value().strip()
+            ),
+            "EXA_API_KEY": bool(
+                self.exa_api_key and self.exa_api_key.get_secret_value().strip()
+            ),
+            "ANTHROPIC_API_KEY": bool(
+                self.anthropic_api_key
+                and self.anthropic_api_key.get_secret_value().strip()
+            ),
+        }
 
     @property
     def database_url(self) -> URL:

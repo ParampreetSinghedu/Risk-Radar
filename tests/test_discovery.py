@@ -159,6 +159,52 @@ def test_empty_results_are_returned_without_failures() -> None:
     assert result.failures == []
 
 
+def test_social_profile_discovery_reports_unconfigured_provider(client: TestClient) -> None:
+    response = client.post("/api/v1/discover/social-profile", json={"handle": "pika"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["query"] == "@pika"
+    assert body["status"] == "provider_unavailable"
+    assert body["candidates"] == []
+    assert any("no authorized platform API provider" in item["reason"] for item in body["failures"])
+
+
+def test_social_profile_discovery_validates_format_and_accepts_optional_at(
+    client: TestClient,
+) -> None:
+    invalid = client.post("/api/v1/discover/social-profile", json={"handle": "pika show"})
+    assert invalid.status_code == 422
+    invalid_evidence = client.post(
+        "/api/v1/evidence/analyze", json={"target": "pika show", "kind": "handle"}
+    )
+    assert invalid_evidence.status_code == 422
+    valid = client.post("/api/v1/discover/social-profile", json={"handle": "@pika"})
+    assert valid.status_code == 200 and valid.json()["query"] == "@pika"
+
+
+def test_social_profile_discovery_preserves_provider_metadata_and_provenance(
+    client: TestClient,
+) -> None:
+    candidate = _candidate("authorized_fixture", "@pika", CandidateType.SOCIAL_PROFILE)
+
+    class Provider:
+        name = "authorized_fixture"
+
+        def search_profiles(self, query: str) -> list[Candidate]:
+            assert query == "@pika"
+            return [candidate]
+
+    client.app.dependency_overrides[get_discovery_service] = lambda: DiscoveryService(
+        [SocialPlatformConnector(provider=Provider())]
+    )
+    response = client.post("/api/v1/discover/social-profile", json={"handle": "pika"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "completed"
+    assert body["candidates"][0]["source_reference"] == candidate.source_reference
+    assert body["candidates"][0]["provenance"]
+
+
 def test_urlhaus_connector_normalizes_host_response() -> None:
     """The URLhaus adapter maps API JSON onto standard candidate records."""
     payload = {

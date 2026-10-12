@@ -102,7 +102,7 @@ def find_matches(db: Session, kind: str, needle: str) -> list[tuple[BrandAsset, 
 
 
 class ExclusionGate:
-    """Decide verified official vs unverified vs not matched; audit everything."""
+    """Decide verified official vs unverified vs not matched; audit public decisions."""
 
     def evaluate(
         self,
@@ -110,8 +110,9 @@ class ExclusionGate:
         target: str,
         kind: Kind = "auto",
         analysis: AnalyzerEvidence | None = None,
+        record_audit: bool = True,
     ) -> GateDecision:
-        """Evaluate one target against Stage 1 official assets and log the decision."""
+        """Evaluate official assets; internal safety re-checks may skip audit writes."""
         limitations: list[str] = []
         identities: list[ClaimedIdentity] = []
 
@@ -166,6 +167,9 @@ class ExclusionGate:
             input_reference=target[:255],
             limitations=limitations,
         )
+
+        if not record_audit:
+            return decision
 
         audit = ExclusionAuditLog(
             input_reference=target[:255],

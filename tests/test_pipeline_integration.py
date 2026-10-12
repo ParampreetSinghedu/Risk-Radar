@@ -6,6 +6,7 @@ from risk_radar.api.v1 import evidence as evidence_api
 from risk_radar.api.v1 import investigate as investigator_api
 from risk_radar.api.v1 import monitoring as monitoring_api
 from risk_radar.api.v1 import rag as rag_api
+from risk_radar.evidence import image_text
 from risk_radar.evidence.resolvers import UnavailableDns, UnavailableRdap, UnavailableRedirect
 from risk_radar.investigator.service import InvestigatorService
 from risk_radar.monitoring.service import MonitorCheckResult, MonitoringService, MonitorSignal
@@ -49,6 +50,17 @@ def test_investigation_results_flow_into_analysis_and_persist_as_case_snapshot(c
     assert rag.json()["retrieved_documents"]
     assert investigation.json()["status"] == "provider_unavailable"
     assert investigation.json()["evidence_hits"]
+
+    from sqlalchemy import select
+
+    from risk_radar.db.models import ExclusionAuditLog
+    from risk_radar.db.session import get_db
+
+    session = next(client.app.dependency_overrides[get_db]())
+    audit_rows = session.scalars(
+        select(ExclusionAuditLog).where(ExclusionAuditLog.input_reference == target)
+    ).all()
+    assert len(audit_rows) == 1  # the explicit Stage 6 decision; internal rechecks are read-only
 
     snapshot = {
         "gate": {"status": "completed", "data": gate.json()},
@@ -98,6 +110,110 @@ def test_social_handle_evidence_uses_profile_analyzer_and_reaches_rules(client):
     )
     assert rules.status_code == 200
     assert any(f["rule_id"] == "username_similarity" for f in rules.json()["findings"])
+
+
+def test_image_observations_reach_rules_rag_and_case_snapshot(client, monkeypatch):
+    """Injected OCR fixture verifies the real API-to-case wiring offline."""
+
+    class FixtureOcr:
+        def extract_text(self, image):
+            return "Urgent verify at https://acme-login.example and contact @acme_help"
+
+    monkeypatch.setattr(image_text, "validate_image", lambda _image: ("image/png", []))
+    monkeypatch.setattr(evidence_api, "get_tesseract_ocr", FixtureOcr)
+    monkeypatch.setattr(rag_api, "get_provider", lambda _settings: None)
+
+    target = "https://acme-login.example"
+    analyzed = client.post(
+        "/api/v1/evidence/analyze",
+        json={
+            "target": target,
+            "kind": "domain",
+            "image_b64": "aW1hZ2U=",
+            "analyzers": ["url", "image"],
+        },
+    )
+    assert analyzed.status_code == 200
+    image_result = next(
+        item for item in analyzed.json()["results"] if item["analyzer_type"] == "image"
+    )
+    assert image_result["status"] == "partial"  # OCR fixture; vision provider unavailable
+    assert {item["kind"] for item in image_result["observations"]} >= {
+        "ocr_text",
+        "embedded_urls",
+        "embedded_handles",
+    }
+
+    gate = client.post(
+        "/api/v1/gate/evaluate",
+        json={"target": target, "kind": "domain", "analysis": image_result},
+    )
+    risk = client.post(
+        "/api/v1/risk/score",
+        json={"target": target, "kind": "domain", "analysis": image_result},
+    )
+    assert gate.status_code == risk.status_code == 200
+    assert gate.json()["outcome"] == "not_matched"
+    assert risk.json()["status"] == "scored"
+
+    rules = client.post(
+        "/api/v1/rules/evaluate",
+        json={"target": target, "kind": "domain", "analysis": image_result},
+    )
+    assert rules.status_code == 200
+    assert any(
+        item["rule_id"] == "embedded_identity_text" for item in rules.json()["findings"]
+    )
+
+    screenshot = client.post(
+        "/api/v1/submissions",
+        json={
+            "submission_type": "screenshot",
+            "content": "data:image/png;base64,aW1hZ2U=",
+            "source": "integration-test",
+        },
+    )
+    transcript = client.post(
+        "/api/v1/submissions",
+        json={
+            "submission_type": "message",
+            "content": (
+                f"Investigated target: {target}\n"
+                f"OCR transcript from screenshot submission #{screenshot.json()['id']}:\n"
+                f"{image_result['observations'][0]['value']}"
+            ),
+            "source": "image_ocr",
+        },
+    )
+    assert screenshot.status_code == 201 and transcript.status_code == 201
+    rag = client.post(
+        "/api/v1/rag/analyze",
+        json={"target": target, "kind": "domain", "analysis": image_result},
+    )
+    assert rag.status_code == 200
+    assert any(
+        document["source_type"] == "submission"
+        and document["provenance"]["source"] == "image_ocr"
+        for document in rag.json()["retrieved_documents"]
+    )
+
+    snapshot = {
+        "evidence": analyzed.json(),
+        "gate": gate.json(),
+        "rules": rules.json(),
+        "risk": risk.json(),
+        "rag": rag.json(),
+        "image_submission": screenshot.json(),
+        "ocr_submission": transcript.json(),
+    }
+    case = client.post(
+        "/api/v1/cases",
+        json={"title": "Screenshot evidence", "target": target, "snapshot": snapshot},
+    )
+    assert case.status_code == 201
+    retrieved = client.get(f"/api/v1/cases/{case.json()['id']}/report")
+    assert retrieved.status_code == 200
+    assert retrieved.json()["snapshot"] == snapshot
 
 
 def test_app_listing_metadata_and_identity_findings_flow_to_case_snapshot(client):
@@ -196,7 +312,7 @@ def test_monitoring_alert_can_be_reviewed_and_retained_in_case_snapshot(client, 
         "MonitoringService",
         lambda: MonitoringService(checker=AuthorizedFixtureChecker()),
     )
-    dashboard = client.get("/").text
+    dashboard = client.get("/app").text
     frontend_script = client.get("/app.js").text
     assert "Monitoring" in dashboard and "data-alert-case" in frontend_script
     target_response = client.post(

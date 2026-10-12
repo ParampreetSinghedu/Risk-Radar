@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#080d17" />
+  <meta name="description" content="Technical overview of SentinelX / Risk Radar: architecture, evidence pipeline, security boundaries, verification status, and known provider limitations." />
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="SentinelX Project Overview — HacXLerate" />
+  <meta property="og:description" content="A technical overview of the implemented evidence-led brand impersonation investigation workflow." />
+  <title>Project Overview — SentinelX / Risk Radar</title>
+  <link rel="stylesheet" href="/site.css" />
+</head>
+<body>
+  <a class="sr-only" href="#main">Skip to content</a>
+  <header class="topbar">
+    <div class="wrap topbar-inner">
+      <a class="wordmark" href="/" aria-label="SentinelX home"><span class="mark" aria-hidden="true">S</span> SENTINELX</a>
+      <nav class="top-nav" aria-label="Main navigation">
+        <a href="/">Introduction</a>
+        <a href="#architecture">Architecture</a>
+        <a href="#verification">Verification</a>
+        <a class="button" href="/app?view=investigate">Open the application <span aria-hidden="true">↗</span></a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="page-hero">
+      <div class="wrap">
+        <span class="eyebrow">HacXLerate · Technical project overview</span>
+        <h1>Evidence-led investigation for digital brand risk.</h1>
+        <p>SentinelX / Risk Radar is a modular application for triaging potential brand impersonation across URLs, domains, social identities, application listings, and user-submitted evidence. It is designed for brand protection analysts, security teams, and evaluators who need findings with traceable sources and visible uncertainty.</p>
+        <div class="actions"><a class="button" href="/app?view=investigate">Run an investigation</a><a class="button secondary" href="/app">Open analyst dashboard</a></div>
+      </div>
+    </section>
+
+    <section class="section" id="architecture">
+      <div class="wrap">
+        <div class="section-head"><span class="eyebrow">System architecture</span><h2>One API-backed investigation and case workflow.</h2><p>FastAPI exposes versioned APIs and serves static pages. Services compose evidence analyzers, provider adapters, persistence, and analysis stages. The browser calls those APIs; it does not reimplement investigation logic.</p></div>
+        <div class="flow" aria-label="Investigation flow, horizontally scrollable on narrow screens"><div class="flow-track">
+          <div class="flow-step"><small>INPUT</small><b>Submission</b></div><span class="flow-arrow" aria-hidden="true">→</span>
+          <div class="flow-step"><small>STAGE 6</small><b>Official-asset gate</b></div><span class="flow-arrow" aria-hidden="true">→</span>
+          <div class="flow-step"><small>STAGE 5</small><b>Evidence analysis</b></div><span class="flow-arrow" aria-hidden="true">→</span>
+          <div class="flow-step"><small>STAGE 7–8</small><b>Rules &amp; optional ML</b></div><span class="flow-arrow" aria-hidden="true">→</span>
+          <div class="flow-step"><small>STAGE 9–12</small><b>Research, risk &amp; grounded RAG</b></div><span class="flow-arrow" aria-hidden="true">→</span>
+          <div class="flow-step"><small>STAGE 13–14</small><b>Cases &amp; analyst review</b></div>
+        </div></div>
+        <div class="grid-3" style="margin-top:22px">
+          <article class="tile"><h3>API and persistence</h3><p>FastAPI and Pydantic contracts expose versioned endpoints. SQLAlchemy models and the configured SQLite or PostgreSQL database persist brands, submissions, cases, snapshots, monitoring checks, observations, and alerts.</p></article>
+          <article class="tile"><h3>Analysis services</h3><p>Evidence analyzers, the official-asset exclusion gate, deterministic rule engine, optional scikit-learn scoring, correlation, investigator, and citation-validated RAG are composed in Python service modules.</p></article>
+          <article class="tile"><h3>Analyst interface</h3><p>Static HTML, CSS, and vanilla JavaScript provide introduction, project overview, dashboard, investigation, monitoring, alerts, cases, reviews, and evaluation views. No frontend build step is required by this repository.</p></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section alt">
+      <div class="wrap grid-2">
+        <div><span class="eyebrow">Evidence and assessment</span><h2>Observations keep their source context.</h2><p class="prose">The evidence pipeline records analyzer/provider provenance and explicit states for incomplete or unavailable work. The Stage 6 gate checks registered brand assets before detection steps. Rule findings include reasons and evidence references. The risk service combines rule and ML signals for prioritization; the result is a ranking score, not a calibrated probability or a verdict.</p></div>
+        <div class="tile"><h3>Grounded investigation and RAG</h3><p>Investigator tools query stored submissions, brand assets, audit data, and configured discovery sources. RAG retrieves stored evidence and may include snippets from the one selected Brave, Tavily or Exa search provider. Snippets are labeled as snippets, result pages are not fetched, and generated claims must cite known retrieved document IDs. Unsupported claims are rejected or reported as partial.</p><p style="margin-top:14px"><b>Human decision stays explicit:</b> cases, analyst reviews, reasons, and feedback labels are persisted separately from model and heuristic output.</p></div>
+      </div>
+    </section>
+
+    <section class="section" id="evidence">
+      <div class="wrap">
+        <div class="section-head"><span class="eyebrow">Screenshot path</span><h2>Image input is validated before optional analysis.</h2><p>The image pipeline validates declared and decoded image format, bounds image size and dimensions, and then records available provider observations independently.</p></div>
+        <div class="grid-3">
+          <article class="tile"><span class="status offline">Implemented offline</span><h3>Decode and evidence record</h3><p>Pillow content decoding, MIME/format consistency checks, dimension limits, image hash, and API-to-case persistence path are covered by deterministic tests.</p></article>
+          <article class="tile"><span class="status partial">Optional provider</span><h3>Local OCR</h3><p>Tesseract support uses the optional Python OCR dependency and an operator-installed Tesseract executable. Neither pytesseract nor the executable is available in this verification environment, so real OCR was not exercised.</p></article>
+          <article class="tile"><span class="status blocked">Not live-verified</span><h3>Vision model</h3><p>An optional Claude vision adapter records model output as an unverified visual observation. No Anthropic credential was configured and no live request was made. Model output does not authenticate a logo, person, profile, or brand.</p></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section alt" id="monitoring">
+      <div class="wrap grid-2">
+        <div><span class="eyebrow">Monitoring and alerts</span><h2>Repeated checks are persisted, with provider limits visible.</h2><p class="prose">Monitoring targets, bounded check intervals, execution records, provider status, observations, change alerts, acknowledgement, and case snapshots are persisted. The in-process scheduler is disabled by default; when enabled, configure a single scheduler-enabled application worker. A target is not shown as active until a provider check succeeds.</p></div>
+        <div class="notice"><strong>External discovery is not implied.</strong><br />A monitoring lifecycle can run against configured providers, but this environment has no authorized social discovery provider. Unsupported or unavailable checks are recorded as unavailable. Provider failure does not mean the earlier evidence disappeared, and does not create a synthetic discovery or disappearance alert.</div>
+      </div>
+    </section>
+
+    <section class="section" id="security">
+      <div class="wrap">
+        <div class="section-head"><span class="eyebrow">Security boundaries</span><h2>Constrained collection and explicit trust boundaries.</h2></div>
+        <div class="grid-3">
+          <article class="tile"><h3>Official asset exclusion</h3><p>The server-side gate is evaluated before risk and alert analysis; clients cannot mark a candidate as alert-eligible to bypass the gate.</p></article>
+          <article class="tile"><h3>URL collection protections</h3><p>Evidence URL validation and bounded request timeouts are part of collection. <code>EVIDENCE_ENABLE_REDIRECTS</code> defaults to false. These controls should not be interpreted as a claim that DNS rebinding is eliminated.</p></article>
+          <article class="tile"><h3>Untrusted inputs and outputs</h3><p>Prompt instructions treat submitted material as untrusted. Search snippets and model observations remain attributed, and citation validation limits RAG claims to retrieved records.</p></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section alt" id="verification">
+      <div class="wrap">
+        <div class="section-head"><span class="eyebrow">Implementation and verification status</span><h2>Offline tests are not live-provider verification.</h2><p>Status here reflects the code and test coverage in this repository; external provider availability depends on authorized access and configuration.</p></div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Capability</th><th>Implementation status</th><th>Verification boundary</th></tr></thead>
+          <tbody>
+            <tr><td>API, core evidence, gate, rules, risk, cases and snapshots</td><td><span class="status offline">Implemented</span><br />Automated offline tests exercise route and service workflows.</td><td>Test clients use isolated SQLite and deterministic inputs; this does not establish production database deployment compatibility.</td></tr>
+            <tr><td>Monitoring target lifecycle and change alerts</td><td><span class="status offline">Implemented</span><br />Persisted checks, observations, alert review, bounded opt-in scheduler and recovery behavior have offline coverage.</td><td>External feed coverage depends on configured providers. Scheduler is in-process and disabled by default.</td></tr>
+            <tr><td>URLhaus and OpenPhish connectors</td><td><span class="status partial">Implemented adapter</span></td><td>Connector behavior is testable offline; no live feed request was made for this project verification.</td></tr>
+            <tr><td>Brave, Tavily and Exa search</td><td><span class="status partial">Optional adapters</span><br />One provider is selected at a time; bounded results and snippet provenance have deterministic mock coverage.</td><td>No search API key is configured; no live request was made. Provider snippets are not page retrieval by this app.</td></tr>
+            <tr><td>Social profile discovery</td><td><span class="status blocked">Provider unavailable</span><br />Provider interface and honest unavailable states are implemented.</td><td>No authorized platform discovery provider or credentials are configured. Manual handle analysis is not continuous discovery.</td></tr>
+            <tr><td>Apple app metadata</td><td><span class="status partial">Implemented adapter</span></td><td>Deterministic mock HTTP tests cover lookup; no live Apple request was made. Android source access is unavailable here.</td></tr>
+            <tr><td>Claude investigation, RAG and vision</td><td><span class="status partial">Optional providers</span></td><td>No Anthropic credential is configured; no live model request was made in this verification.</td></tr>
+            <tr><td>Tesseract OCR</td><td><span class="status partial">Optional local provider</span></td><td>Not exercised: pytesseract and the Tesseract executable are absent in the verification environment.</td></tr>
+            <tr><td>Frontend</td><td><span class="status offline">Static HTML/CSS/JavaScript</span></td><td>Route/content, JavaScript syntax, and Node helper tests run offline. No browser automation or production deployment was performed.</td></tr>
+          </tbody>
+        </table></div>
+      </div>
+    </section>
+
+    <section class="section" id="stack">
+      <div class="wrap grid-2">
+        <div><span class="eyebrow">Technology in the source</span><h2>Existing dependencies, optional providers.</h2><div class="stack-list"><span>Python ≥ 3.12</span><span>FastAPI</span><span>Pydantic / Settings</span><span>SQLAlchemy 2</span><span>Alembic</span><span>SQLite / PostgreSQL</span><span>httpx</span><span>scikit-learn</span><span>pytest</span><span>Ruff</span><span>Node.js tests</span></div></div>
+        <div class="tile"><h3>External and optional integrations</h3><p>Source includes adapters for URLhaus, OpenPhish, Brave Search, Tavily, Exa, Apple App Store lookup, Anthropic Claude, and optional local Tesseract OCR. Adapter presence is not a claim that credentials are configured, a provider is reachable, or a live response was verified. Search configuration exposes only key-presence booleans at <code>/api/v1/providers/configuration</code>.</p><p style="margin-bottom:0">The frontend is static and vanilla JavaScript. There is no package.json or frontend build system in this project.</p></div>
+      </div>
+    </section>
+
+    <section class="section alt" id="tests">
+      <div class="wrap grid-2">
+        <div><span class="eyebrow">Test methodology</span><h2>Deterministic tests exercise local contracts.</h2><p class="prose">Python tests use pytest, an isolated SQLite test database, injected provider fixtures, and mocked HTTP responses where external services would otherwise be required. Frontend helpers have Node tests and served JavaScript can be checked with Node syntax validation.</p></div>
+        <div class="notice"><strong>What these tests establish:</strong><br />Contract behavior, state handling, persistence paths, evidence provenance, and expected provider failures under deterministic fixtures.<br /><br /><strong>What they do not establish:</strong><br />Live source coverage, production-scale reliability, detection accuracy on real adversarial data, OCR/model quality, or external service availability.</div>
+      </div>
+    </section>
+
+    <section class="section" id="future-scope">
+      <div class="wrap">
+        <div class="section-head"><span class="eyebrow">Future scope · Not implemented</span><h2>Expand coverage only when it can be verified.</h2><p>Possible next steps depend on authorized access, deployment requirements, and representative evaluation data. None of the following is presented as a current capability.</p></div>
+        <div class="grid-3">
+          <article class="tile"><span class="status blocked">Planned</span><h3>Authorized platform discovery</h3><p>Integrate a social provider only after API authorization, terms review, and reliable retrieval semantics are available.</p></article>
+          <article class="tile"><span class="status blocked">Planned</span><h3>Deployment-grade scheduling</h3><p>Assess a durable cross-process scheduler if the deployment grows beyond the current opt-in single-process worker model.</p></article>
+          <article class="tile"><span class="status blocked">Planned</span><h3>Representative quality evaluation</h3><p>Build a reviewed, privacy-conscious dataset and measure precision, recall, false positives, and provider coverage before making accuracy claims.</p></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="cta">
+      <div class="wrap"><span class="eyebrow">Explore the working application</span><h2>Follow the evidence into a case.</h2><p>Open the current investigation workspace to inspect supported workflows and provider status.</p><a class="button" href="/app?view=investigate">Start an investigation <span aria-hidden="true">→</span></a></div>
+    </section>
+  </main>
+  <footer><div class="wrap footer-inner"><span>SentinelX / Risk Radar · Technical overview</span><span class="footer-links"><a href="/">Introduction</a><a href="/app">Dashboard</a></span></div></footer>
+</body>
+</html>

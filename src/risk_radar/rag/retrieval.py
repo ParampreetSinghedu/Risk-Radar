@@ -126,25 +126,30 @@ class StoredEvidenceRetriever:
         audit_entries = db.scalars(
             select(ExclusionAuditLog)
             .where(ExclusionAuditLog.input_reference.ilike(needle))
-            .order_by(ExclusionAuditLog.id)
-            .limit(_MAX_DOCS)
+            .order_by(ExclusionAuditLog.id.desc())
+            .limit(1)
         ).all()
-        for entry in audit_entries:
-            docs.append(
-                RetrievedDocument(
-                    doc_id=f"audit_log:{entry.id}",
-                    source_type="audit_log",
-                    locator=entry.input_reference,
-                    content=f"gate {entry.decision}: {entry.reason[:300]}",
-                    relevance=_relevance(entry.input_reference, terms),
-                    retrieved_at=now,
-                    provenance={
-                        "audit_id": entry.id,
-                        "decision": entry.decision,
-                        "alert_eligible": entry.alert_eligible,
-                    },
+        # An audit row records a gate decision, not independent evidence.
+        # Repeated pipeline reads can create many equivalent rows; retain at
+        # most the latest one, and let substantive submissions/assets take
+        # precedence when any are available.
+        if not any(doc.source_type != "audit_log" for doc in docs):
+            for entry in audit_entries:
+                docs.append(
+                    RetrievedDocument(
+                        doc_id=f"audit_log:{entry.id}",
+                        source_type="audit_log",
+                        locator=entry.input_reference,
+                        content=f"gate {entry.decision}: {entry.reason[:300]}",
+                        relevance=_relevance(entry.input_reference, terms),
+                        retrieved_at=now,
+                        provenance={
+                            "audit_id": entry.id,
+                            "decision": entry.decision,
+                            "alert_eligible": entry.alert_eligible,
+                        },
+                    )
                 )
-            )
 
         # Deterministic ranking: relevance desc, then doc_id for stable ties.
         docs.sort(key=lambda d: (-d.relevance, d.doc_id))

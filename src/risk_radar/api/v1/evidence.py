@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from risk_radar.core.config import get_settings
 from risk_radar.db.models import Brand
 from risk_radar.db.session import get_db
+from risk_radar.evidence.image_text import ImageAnalyzer
 from risk_radar.evidence.resolvers import get_resolvers
 from risk_radar.evidence.service import (
     EvidenceAnalysisResult,
@@ -20,7 +21,7 @@ from risk_radar.evidence.service import (
     EvidenceRequest,
 )
 from risk_radar.evidence.url_domain import UrlDomainAnalyzer
-from risk_radar.evidence.vision import get_vision_provider
+from risk_radar.evidence.vision import get_tesseract_ocr, get_vision_provider
 
 router = APIRouter(tags=["evidence"])
 
@@ -41,4 +42,5 @@ def analyze_evidence(
     vision = get_vision_provider(settings)
     dns, rdap, redirects = get_resolvers(settings)
     url_analyzer = UrlDomainAnalyzer(dns=dns, rdap=rdap, redirects=redirects)
-    return EvidenceEngine(url=url_analyzer, vision=vision).analyze(db, payload)
+    image_analyzer = ImageAnalyzer(ocr=get_tesseract_ocr(), vision=vision)
+    return EvidenceEngine(url=url_analyzer, image=image_analyzer).analyze(db, payload)

@@ -8,7 +8,10 @@ Stage 6 integration. No network, OCR or external services are required.
 from __future__ import annotations
 
 import base64
+import struct
+import zlib
 
+import pytest
 from app.schemas.evidence import AnalyzerResult
 
 from risk_radar.evidence.brand_profile import BrandProfileAnalyzer
@@ -168,20 +171,29 @@ def test_text_analyzer_benign_text_has_no_indicators_but_is_not_safe():
 
 
 def test_image_analyzer_unavailable_without_backend():
-    """No OCR dependency => unavailable; contents are never fabricated."""
-    result = ImageAnalyzer().analyze(b"\x89PNG\r\n\x1a\nfake")
+    """Absent providers are explicit; no image content is fabricated."""
+    result = ImageAnalyzer().analyze(_valid_png())
     assert result.status == "unavailable"
-    assert result.observations == []
+    statuses = [item for item in result.observations if item["kind"] == "provider_status"]
+    assert {item["value"]["provider"] for item in statuses} == {"local_ocr", "vision"}
     assert any("fabricated" in lim for lim in result.limitations)
 
 
+def test_image_analyzer_rejects_invalid_image_signature():
+    result = ImageAnalyzer().analyze(b"not-an-image")
+    assert result.status == "failed"
+    assert any("unsupported" in limitation for limitation in result.limitations)
+
+
 def test_image_analyzer_uses_injected_ocr():
+    pytest.importorskip("PIL.Image")
+
     class FakeOcr:
         def extract_text(self, image):
             return "PAYPAL LOGIN"
 
-    result = ImageAnalyzer(ocr=FakeOcr()).analyze(b"bytes")
-    assert result.status == "completed"
+    result = ImageAnalyzer(ocr=FakeOcr()).analyze(_valid_png())
+    assert result.status == "partial"  # OCR succeeded; optional vision is not configured.
     assert any(o.get("kind") == "ocr_text" for o in result.observations)
 
 
@@ -201,6 +213,47 @@ def test_engine_runs_selected_analyzers(client):
     # every result still validates as her contract
     for r in result.results:
         assert isinstance(r, AnalyzerResult)
+
+
+def test_engine_auto_classifies_plain_name_without_url_analysis(client):
+    session = _session_from_client(client)
+    result = EvidenceEngine().analyze(session, EvidenceRequest(target="iron man"))
+    assert [item.analyzer_type for item in result.results] == ["brand_profile"]
+    assert all(item.analyzer_type != "url" for item in result.results)
+
+
+def test_engine_classifies_domains_urls_handles_and_application_ids(client):
+    session = _session_from_client(client)
+    engine = EvidenceEngine()
+    cases = [
+        ("https://example.com/path", "auto", {"url", "brand_profile"}),
+        ("example.com", "auto", {"url", "brand_profile"}),
+        ("@example", "auto", {"brand_profile"}),
+        ("com.example.app", "auto", {"application"}),
+    ]
+    for target, kind, expected in cases:
+        result = engine.analyze(session, EvidenceRequest(target=target, kind=kind))
+        assert {item.analyzer_type for item in result.results} == expected
+
+
+def test_engine_preserves_explicit_name_type_and_image_decoder(client):
+    session = _session_from_client(client)
+    result = EvidenceEngine().analyze(
+        session,
+        EvidenceRequest(target="iron man", kind="name", analyzers=["brand_profile"]),
+    )
+    assert [item.analyzer_type for item in result.results] == ["brand_profile"]
+    good = base64.b64encode(b"png").decode()
+    image = EvidenceEngine().analyze(
+        session, EvidenceRequest(target="unused", analyzers=["image"], image_b64=good)
+    )
+    assert image.results[0].analyzer_type == "image"
+
+
+def test_engine_malformed_url_like_name_does_not_crash_or_reach_url_analyzer(client):
+    session = _session_from_client(client)
+    result = EvidenceEngine().analyze(session, EvidenceRequest(target="http://[broken"))
+    assert [item.analyzer_type for item in result.results] == ["brand_profile"]
 
 
 def test_engine_isolates_analyzer_failure(client):
@@ -283,3 +336,16 @@ def _register_brand(session, name, assets, verify_first=False):
             BrandAsset(brand_id=brand.id, asset_type=asset_type, value=value, verified=verify_first)
         )
     session.commit()
+
+
+def _valid_png():
+    def chunk(kind, payload):
+        body = kind + payload
+        return struct.pack(">I", len(payload)) + body + struct.pack(">I", zlib.crc32(body))
+
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(b"\x00\xff\xff\xff"))
+        + chunk(b"IEND", b"")
+    )

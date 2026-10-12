@@ -22,7 +22,9 @@ class RetrievedDocument(BaseModel):
     """One retrievable stored document with provenance and relevance."""
 
     doc_id: str
-    source_type: Literal["submission", "brand_asset", "audit_log", "analyzer", "target"]
+    source_type: Literal[
+        "submission", "brand_asset", "audit_log", "analyzer", "target", "web_search"
+    ]
     locator: str | None = None
     content: str
     relevance: float = Field(ge=0, le=1, default=0.0)

@@ -25,6 +25,11 @@ class ResearchHit(BaseModel):
     url: str
     summary: str
     retrieved_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    title: str | None = None
+    snippet: str | None = None
+    content_kind: str = "provider_record"
+    page_content_retrieved: bool = False
+    search_query: str | None = None
 
 
 class SourceCitation(BaseModel):

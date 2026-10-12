@@ -13,10 +13,13 @@ from __future__ import annotations
 
 import base64
 import binascii
+import ipaddress
+import re
 from typing import Literal
+from urllib.parse import urlsplit
 
 from app.schemas.evidence import AnalyzerResult
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.orm import Session
 
 from risk_radar.evidence.application import ApplicationListingAnalyzer
@@ -27,6 +30,8 @@ from risk_radar.evidence.url_domain import UrlDomainAnalyzer
 from risk_radar.evidence.vision import VisionProvider
 
 AnalyzerName = Literal["url", "brand_profile", "text", "image", "application"]
+_HANDLE_FORMAT = re.compile(r"^@?[A-Za-z0-9_.]{1,50}$")
+_MAX_IMAGE_BASE64_LENGTH = 4 * ((10 * 1024 * 1024 + 2) // 3)
 
 
 class EvidenceRequest(BaseModel):
@@ -36,10 +41,17 @@ class EvidenceRequest(BaseModel):
     brand_id: int | None = Field(default=None, gt=0)
     kind: Literal["auto", "domain", "handle", "name", "application"] = "auto"
     text: str | None = Field(default=None, max_length=20000)
-    image_b64: str | None = None
+    image_b64: str | None = Field(default=None, max_length=_MAX_IMAGE_BASE64_LENGTH)
     input_type: str = "url"
     investigation_id: str = Field(default="unspecified", max_length=128)
     analyzers: list[AnalyzerName] | None = None
+
+    @model_validator(mode="after")
+    def validate_social_handle(self) -> EvidenceRequest:
+        if self.kind == "handle" or self.input_type in {"handle", "social_profile"}:
+            if not _HANDLE_FORMAT.fullmatch(self.target.strip()):
+                raise ValueError("handle must be 1-50 letters, digits, underscores or dots")
+        return self
 
 
 class AnalyzerSummary(BaseModel):
@@ -89,12 +101,37 @@ class EvidenceEngine:
 
     def analyze(self, db: Session, request: EvidenceRequest) -> EvidenceAnalysisResult:
         """Analyze one candidate; analyzer errors never abort the run."""
-
-        selected = request.analyzers or ["url", "brand_profile"]
+        candidate_kind, input_type = classify_candidate(
+            request.target, kind=request.kind, input_type=request.input_type
+        )
+        default_selection = {
+            "domain": ["url", "brand_profile"],
+            "handle": ["brand_profile"],
+            "name": ["brand_profile"],
+            "application": ["application"],
+        }
+        requested = (
+            list(request.analyzers)
+            if request.analyzers is not None
+            else default_selection[candidate_kind] + (["image"] if request.image_b64 else [])
+        )
+        selected = [
+            name
+            for name in requested
+            if not (
+                name == "url" and candidate_kind not in {"domain"}
+                or name == "application" and candidate_kind != "application"
+            )
+        ]
         results: list[AnalyzerResult] = []
         limitations: list[str] = []
         errors: list[dict[str, str]] = []
         iid = request.investigation_id
+        if len(selected) < len(requested):
+            skipped = sorted(set(requested) - set(selected))
+            limitations.append(
+                f"analyzers {', '.join(skipped)} skipped: input classified as {candidate_kind}"
+            )
 
         for name in selected:
             try:
@@ -102,7 +139,7 @@ class EvidenceEngine:
                     results.append(
                         self._url.analyze(
                             request.target,
-                            input_type=request.input_type,
+                            input_type=input_type,
                             investigation_id=iid,
                         )
                     )
@@ -111,8 +148,8 @@ class EvidenceEngine:
                         self._brand.analyze(
                             db,
                             request.target,
-                            kind=request.kind,
-                            input_type=request.input_type,
+                            kind=candidate_kind,
+                            input_type=input_type,
                             investigation_id=iid,
                             brand_id=request.brand_id,
                         )
@@ -121,7 +158,7 @@ class EvidenceEngine:
                     results.append(
                         self._text.analyze(
                             request.text or request.target,
-                            input_type=request.input_type,
+                            input_type=input_type,
                             investigation_id=iid,
                         )
                     )
@@ -130,7 +167,7 @@ class EvidenceEngine:
                     results.append(
                         self._image.analyze(
                             image_bytes,
-                            input_type=request.input_type,
+                            input_type=input_type,
                             investigation_id=iid,
                         )
                     )
@@ -139,7 +176,7 @@ class EvidenceEngine:
                         self._application.analyze(
                             db,
                             request.target,
-                            input_type=request.input_type,
+                            input_type=input_type,
                             investigation_id=iid,
                             brand_id=request.brand_id,
                         )
@@ -180,3 +217,68 @@ class EvidenceEngine:
         except (binascii.Error, ValueError):
             errors.append({"stage": "image", "message": "invalid base64 image data"})
             return None
+
+
+_DOMAIN_LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+_DOMAIN_TLD = re.compile(r"^[A-Za-z]{2,63}$")
+
+
+def _valid_host(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        pass
+    labels = host.rstrip(".").split(".")
+    return (
+        len(labels) >= 2
+        and _DOMAIN_TLD.fullmatch(labels[-1]) is not None
+        and all(_DOMAIN_LABEL.fullmatch(label) is not None for label in labels[:-1])
+    )
+
+
+def classify_candidate(
+    target: str, *, kind: str = "auto", input_type: str = "url"
+) -> tuple[str, str]:
+    """Resolve explicit types first, then validate formats before dispatch."""
+    value = target.strip()
+    if kind != "auto":
+        resolved = kind
+    elif input_type in {"social_profile", "handle"}:
+        resolved = "handle"
+    elif input_type in {"application", "app_listing"}:
+        resolved = "application"
+    elif input_type in {"name", "text"}:
+        resolved = "name"
+    elif value.startswith("@"):
+        resolved = "handle"
+    elif value.isdecimal():
+        resolved = "application"
+    elif value.startswith(("http://", "https://")):
+        parts = None
+        try:
+            parts = urlsplit(value)
+            host = parts.hostname or ""
+        except ValueError:
+            host = ""
+        if parts is not None and parts.scheme in {"http", "https"} and _valid_host(host):
+            if ApplicationListingAnalyzer._parse(value) is not None:
+                resolved = "application"
+            else:
+                resolved = "domain"
+        else:
+            resolved = "name"
+    elif value.lower().startswith("com.") and ApplicationListingAnalyzer._parse(value):
+        resolved = "application"
+    elif _valid_host(value):
+        resolved = "domain"
+    else:
+        resolved = "name"
+
+    resolved_input = {
+        "domain": "url",
+        "handle": "social_profile",
+        "name": "text",
+        "application": "app_listing",
+    }[resolved]
+    return resolved, resolved_input

@@ -10,12 +10,12 @@ from risk_radar.discovery.base import (
 
 
 class WebSearchConnector(DiscoveryConnector):
-    """Web search adapter; no search provider is configured in this project yet."""
+    """Unavailable legacy adapter; configured deployments use BraveSearchConnector."""
 
     name = "web_search"
 
     def search(self, query: str) -> list[Candidate]:
-        """Raise an explicit availability error until a provider is configured."""
+        """Keep the old seam explicit for callers that have no provider config."""
         raise ConnectorUnavailableError("web_search: no search provider or API key is configured")
 
 

@@ -24,6 +24,8 @@ from typing import Literal
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from risk_radar.collection.service import url_errors
+from risk_radar.discovery.base import ConnectorError, DiscoveryConnector
 from risk_radar.gate.contracts import AnalyzerEvidence
 from risk_radar.gate.service import ExclusionGate, GateDecision
 from risk_radar.investigator.llm import LLMProvider, ProviderError
@@ -92,9 +94,11 @@ class RAGAnalysisEngine:
         self,
         provider: LLMProvider | None = None,
         retriever: Retriever | None = None,
+        research_connector: DiscoveryConnector | None = None,
     ) -> None:
         self._provider = provider
         self._retriever = retriever or StoredEvidenceRetriever()
+        self._research_connector = research_connector
 
     def analyze(self, db: Session, request: RAGRequest) -> RAGAnalysis:
         """Run gate, retrieval and (optional) grounded LLM analysis."""
@@ -105,7 +109,11 @@ class RAGAnalysisEngine:
         # 1. Stage 6 gate first — authoritative, server-side, fail closed.
         try:
             decision: GateDecision = ExclusionGate().evaluate(
-                db=db, target=request.target, kind=request.kind, analysis=request.analysis
+                db=db,
+                target=request.target,
+                kind=request.kind,
+                analysis=request.analysis,
+                record_audit=False,
             )
         except Exception as exc:  # noqa: BLE001 - fail closed on any gate failure
             return RAGAnalysis(
@@ -140,6 +148,7 @@ class RAGAnalysisEngine:
 
         limitations: list[str] = []
         errors: list[dict[str, str]] = []
+        research_failed = False
 
         # 2. Retrieve stored evidence.
         try:
@@ -149,14 +158,67 @@ class RAGAnalysisEngine:
             errors.append({"stage": "retrieval", "message": exc.__class__.__name__})
             limitations.append(f"retrieval failed ({exc.__class__.__name__}): no documents")
 
+        # Search snippets can ground Stage 12 claims but are explicitly marked
+        # as provider excerpts. Result pages are never fetched by this service.
+        if self._research_connector is not None:
+            try:
+                search_candidates = self._research_connector.search(request.target)
+            except ConnectorError as exc:
+                research_failed = True
+                errors.append({"stage": "web_search", "message": str(exc)})
+                limitations.append(f"web search unavailable: {exc}")
+            except Exception as exc:  # noqa: BLE001 - isolate provider failures
+                research_failed = True
+                errors.append({"stage": "web_search", "message": exc.__class__.__name__})
+                limitations.append(
+                    f"web search failed ({exc.__class__.__name__}); no search evidence added"
+                )
+            else:
+                seen_search_urls: set[str] = set()
+                for candidate in search_candidates[:10]:
+                    if url_errors(candidate.target) or candidate.target in seen_search_urls:
+                        continue
+                    seen_search_urls.add(candidate.target)
+                    title = str(candidate.metadata.get("title") or "Untitled search result")[:500]
+                    snippet = str(candidate.metadata.get("snippet") or "")[:3000]
+                    discovered_at = candidate.discovered_at
+                    doc_id = f"web_search:{candidate.candidate_id}"
+                    documents.append(
+                        RetrievedDocument(
+                            doc_id=doc_id,
+                            source_type="web_search",
+                            locator=candidate.target,
+                            content=(
+                                "Unverified search snippet; page content was not retrieved.\n"
+                                f"Title: {title}\nSnippet: {snippet}"
+                            ),
+                            relevance=0.25,
+                            retrieved_at=discovered_at,
+                            provenance={
+                                "provider": candidate.source,
+                                "provider_reference": candidate.source_reference,
+                                "content_kind": candidate.metadata.get(
+                                    "content_kind", "search_snippet"
+                                ),
+                                "page_content_retrieved": False,
+                                "query": candidate.metadata.get("query"),
+                            },
+                        )
+                    )
+                if not search_candidates:
+                    limitations.append(
+                        "web search returned no matching result; this is not evidence of safety"
+                    )
+
         if not documents and not errors:
             return RAGAnalysis(
                 status="no_evidence",
                 candidate_ref=ref,
                 provider=provider_name,
                 gate_decision=decision,
-                limitations=[
-                    "no stored evidence matched this candidate: analysis cannot be "
+                limitations=limitations
+                + [
+                    "no stored or web evidence matched this candidate: analysis cannot be "
                     "grounded and no claims were generated"
                 ],
                 analyzed_at=now,
@@ -207,7 +269,7 @@ class RAGAnalysisEngine:
                 f"{len(rejected)} claim(s) rejected: unsupported, uncited, or "
                 "citing unknown documents"
             )
-        partial = bool(errors) or bool(rejected)
+        partial = bool(errors) or bool(rejected) or research_failed
         return RAGAnalysis(
             status="partial" if partial else "completed",
             candidate_ref=ref,

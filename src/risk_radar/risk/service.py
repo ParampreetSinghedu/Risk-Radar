@@ -183,7 +183,11 @@ class RiskImpactEngine:
         # Stage 6 first, server-side, always.
         try:
             decision: GateDecision = ExclusionGate().evaluate(
-                db=db, target=request.target, kind=request.kind, analysis=request.analysis
+                db=db,
+                target=request.target,
+                kind=request.kind,
+                analysis=request.analysis,
+                record_audit=False,
             )
         except Exception as exc:  # noqa: BLE001 - fail closed on any gate failure
             return RiskImpactScore(

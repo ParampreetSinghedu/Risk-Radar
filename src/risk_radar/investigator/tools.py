@@ -97,8 +97,15 @@ def web_research(
                 reference=f"{candidate.source}:{candidate.target}",
                 source=candidate.source,
                 url=candidate.target,
-                summary=str(candidate.metadata)[:160],
-                retrieved_at=datetime.now(UTC),
+                summary=str(candidate.metadata.get("snippet") or candidate.metadata)[:3000],
+                retrieved_at=candidate.discovered_at or datetime.now(UTC),
+                title=candidate.metadata.get("title"),
+                snippet=candidate.metadata.get("snippet"),
+                content_kind=candidate.metadata.get("content_kind", "provider_record"),
+                page_content_retrieved=bool(
+                    candidate.metadata.get("page_content_retrieved", False)
+                ),
+                search_query=candidate.metadata.get("query"),
             )
         )
     if skipped:

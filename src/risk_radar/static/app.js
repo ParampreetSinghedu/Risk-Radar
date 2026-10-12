@@ -111,6 +111,9 @@ function renderMonitoringAlerts(alerts) {
     button.disabled = true;
     try {
       const check = await api(`/monitoring/targets/${alert.target_id}/checks/${alert.check_id}`);
+      const summary = buildInvestigationSummary(alert.target, {
+        monitoring: { ok: true, data: { ...check, alert } },
+      }, "monitoring");
       const created = await api("/cases", {
         method: "POST",
         body: JSON.stringify({
@@ -118,7 +121,7 @@ function renderMonitoringAlerts(alerts) {
           target: alert.target,
           kind,
           note: `Created from monitoring alert #${alert.id}`,
-          snapshot: { monitoring_check: check, monitoring_alert: alert },
+          snapshot: { monitoring_check: check, monitoring_alert: alert, summary: { status: "completed", data: summary } },
         }),
       });
       button.textContent = `Case #${created.id}`;
@@ -186,6 +189,10 @@ document.querySelectorAll("#nav button").forEach((btn) => {
     if (btn.dataset.view === "evaluation") loadEvaluation();
   });
 });
+
+const requestedView = new URLSearchParams(window.location.search).get("view");
+const requestedViewButton = Array.from(document.querySelectorAll("#nav button"))
+  .find((btn) => btn.dataset.view === requestedView);
 
 /* ---------- dashboard ---------- */
 async function loadDashboard() {
@@ -269,26 +276,59 @@ $("#sub-btn").addEventListener("click", async () => {
 /* ---------- investigate ---------- */
 $("#inv-btn").addEventListener("click", runPipeline);
 async function runPipeline() {
-  const target = $("#inv-target").value.trim();
+  let target = $("#inv-target").value.trim();
   const candidateType = $("#inv-type").value;
   const out = $("#inv-result");
   if (!target) { flash("Enter a target first", false); return; }
+  if (candidateType === "social_profile") {
+    const handle = normalizeSocialHandle(target);
+    if (!handle.valid) {
+      out.innerHTML = `<div class='state error'>Invalid handle format. ${esc(handle.reason)}</div>`;
+      flash("Handle format is invalid", false);
+      return;
+    }
+    target = handle.normalized;
+  }
+  const imageFile = $("#inv-image").files[0];
+  let imageUpload = null;
+  if (imageFile) {
+    try { imageUpload = await encodeImageFile(imageFile); }
+    catch (e) {
+      out.innerHTML = `<div class='state error'>Image validation failed: ${esc(e.message)}</div>`;
+      flash(e.message, false);
+      return;
+    }
+  }
   out.innerHTML = "<div class='state'>Running pipeline…</div>";
   const stage = {};
+  stage.candidate_target = target;
+  stage.candidate_type = candidateType;
   const render = () => { out.innerHTML = renderInvestigation(target, stage); };
-  const isHandle = /^@[A-Za-z0-9_.]{1,50}$/.test(target);
+  const isHandle = (candidateType === "social_profile" || candidateType === "auto") &&
+    normalizeSocialHandle(target).valid && target.startsWith("@");
   const isApplication = candidateType === "app_listing";
-  if (candidateType === "social_profile" && !isHandle) {
-    flash("Enter a plain @handle; profile URL parsing needs a configured platform provider", false);
-    return;
+  const explicitKind = candidateType === "social_profile" ? "handle" :
+    candidateType === "app_listing" ? "application" : candidateType;
+  if (candidateType === "social_profile") {
+    try {
+      stage.social_discovery = { ok: true, data: await api("/discover/social-profile", {
+        method: "POST", body: JSON.stringify({ handle: target }),
+      }) };
+    } catch (e) { stage.social_discovery = { ok: false, error: e.message }; }
   }
   const evidenceRequest = isApplication
     ? { target, kind: "application", input_type: "app_listing", analyzers: ["application"] }
     : isHandle || candidateType === "social_profile"
     ? { target, kind: "handle", input_type: "social_profile", analyzers: ["brand_profile"] }
-    : { target };
-  const downstreamContext = isApplication ? { kind: "application" } :
-    (isHandle || candidateType === "social_profile") ? { kind: "handle" } : {};
+    : { target, kind: explicitKind || "auto" };
+  if (imageUpload) {
+    evidenceRequest.image_b64 = imageUpload.base64;
+    evidenceRequest.analyzers = [...new Set([...(evidenceRequest.analyzers ||
+      (candidateType === "name" ? ["brand_profile"] : ["url", "brand_profile"])), "image"])]
+      .filter((name) => name !== "url" || ["auto", "domain"].includes(candidateType));
+  }
+  const downstreamContext = { kind: isApplication ? "application" :
+    (isHandle || candidateType === "social_profile") ? "handle" : (explicitKind || "auto") };
 
   // Application identity must come from the parsed listing evidence, not its store host.
   if (isApplication) {
@@ -297,34 +337,57 @@ async function runPipeline() {
     render();
   }
 
-  // Step 1: run gate and evidence concurrently for URL/profile workflows.
-  if (!isApplication) await Promise.all([
-    (async () => {
-      try { stage.gate = { ok: true, data: await api("/gate/evaluate", { method: "POST", body: JSON.stringify({ target }) }) }; }
-      catch (e) { stage.gate = { ok: false, error: e.message }; }
-      render();
-    })(),
-    (async () => {
-      try { stage.evidence = { ok: true, data: await api("/evidence/analyze", { method: "POST", body: JSON.stringify(evidenceRequest) }) }; }
-      catch (e) { stage.evidence = { ok: false, error: e.message }; }
-      render();
-    })(),
-  ]);
+  // Stage 5 must complete before Stage 6 so the gate can evaluate the same
+  // source-backed identity observations forwarded to the downstream stages.
+  if (!isApplication) {
+    try { stage.evidence = { ok: true, data: await api("/evidence/analyze", { method: "POST", body: JSON.stringify(evidenceRequest) }) }; }
+    catch (e) { stage.evidence = { ok: false, error: e.message }; }
+    render();
+  }
 
   // Prefer usable evidence for the submitted identifier, so a handle never forwards
   // a failed URL parse to downstream services.
   const evidenceData = stage.evidence && stage.evidence.ok ? stage.evidence.data : null;
   const results = evidenceData && Array.isArray(evidenceData.results) ? evidenceData.results : [];
   const preferredAnalyzer = isApplication ? "application" : isHandle || candidateType === "social_profile" ? "brand_profile" : "url";
-  const analysisPayload = results.find((r) => r.analyzer_type === preferredAnalyzer && ["completed", "partial"].includes(r.status)) ||
+  const primaryAnalysis = results.find((r) => r.analyzer_type === preferredAnalyzer && ["completed", "partial"].includes(r.status)) ||
     results.find((r) => ["completed", "partial"].includes(r.status)) || null;
+  const imageResult = results.find((r) => r.analyzer_type === "image");
+  const imageAnalysis = results.find((r) => r.analyzer_type === "image" && ["completed", "partial"].includes(r.status));
+  const analysisPayload = mergeAnalysisResults(primaryAnalysis, imageAnalysis);
+
+  if (imageUpload && imageResult && imageResult.status !== "failed") {
+    try {
+      const saved = await api("/submissions", { method: "POST", body: JSON.stringify({
+        submission_type: "screenshot", content: imageUpload.dataUri, source: "investigation_upload",
+      }) });
+      stage.image_submission = { ok: true, data: { id: saved.id, content_hash: saved.content_hash, created_at: saved.created_at } };
+      const observations = imageAnalysis?.observations || [];
+      const extractedTexts = [
+        { kind: "ocr_text", stageKey: "image_transcript_submission", source: "image_ocr", label: "OCR transcript" },
+        { kind: "vision_model_observation", stageKey: "image_vision_submission", source: "image_vision_model", label: "Unverified vision-model observation" },
+      ];
+      for (const item of extractedTexts) {
+        const content = observations.find((observation) => observation.kind === item.kind)?.value;
+        if (typeof content !== "string" || !content.trim()) continue;
+        try {
+          const textSubmission = await api("/submissions", { method: "POST", body: JSON.stringify({
+            submission_type: "message",
+            content: `Investigated target: ${target}\n${item.label} from screenshot submission #${saved.id} (${saved.content_hash}):\n${content}`,
+            source: item.source,
+          }) });
+          stage[item.stageKey] = { ok: true, data: { id: textSubmission.id, content_hash: textSubmission.content_hash, created_at: textSubmission.created_at } };
+        } catch (e) { stage[item.stageKey] = { ok: false, error: e.message }; }
+      }
+    } catch (e) {
+      stage.image_submission = { ok: false, error: e.message };
+    }
+  }
 
   // Step 2: Run Stage 7 rules with real Stage 5 analysis payload.
-  if (isApplication) {
-    try { stage.gate = { ok: true, data: await api("/gate/evaluate", { method: "POST", body: JSON.stringify({ target, kind: "application", analysis: analysisPayload }) }) }; }
-    catch (e) { stage.gate = { ok: false, error: e.message }; }
-    render();
-  }
+  try { stage.gate = { ok: true, data: await api("/gate/evaluate", { method: "POST", body: JSON.stringify({ target, ...downstreamContext, analysis: analysisPayload }) }) }; }
+  catch (e) { stage.gate = { ok: false, error: e.message }; }
+  render();
   try {
     const rulesBody = { target, ...downstreamContext, analysis: analysisPayload };
     stage.rules = { ok: true, data: await api("/rules/evaluate", { method: "POST", body: JSON.stringify(rulesBody) }) };
@@ -375,6 +438,7 @@ async function runPipeline() {
 }
 
 function hasIncompleteResult(result) {
+  if (!result || typeof result.ok !== "boolean") return false;
   if (!result.ok) return true;
   const data = result.data || {};
   const incompleteStatuses = ["partial", "failed", "failed_closed", "provider_unavailable", "no_evidence", "unavailable", "no_model", "model_unavailable", "routed_to_verification", "excluded_verified_official"];
@@ -385,17 +449,73 @@ function hasIncompleteResult(result) {
     (Array.isArray(data.summaries) && data.summaries.some((summary) => summary.status !== "completed"));
 }
 
+async function encodeImageFile(file) {
+  const maxBytes = 10 * 1024 * 1024;
+  const supported = ["image/jpeg", "image/png", "image/gif", "image/webp"];
+  if (!supported.includes(file.type)) throw new Error("Select a JPEG, PNG, GIF or WebP image.");
+  if (file.size < 1 || file.size > maxBytes) throw new Error("Image must be between 1 byte and 10 MB.");
+  if (typeof createImageBitmap !== "function") throw new Error("This browser cannot validate image contents.");
+  const bitmap = await createImageBitmap(file);
+  const validDimensions = bitmap.width > 0 && bitmap.height > 0 && bitmap.width * bitmap.height <= 40_000_000;
+  bitmap.close();
+  if (!validDimensions) throw new Error("Image dimensions are invalid or exceed 40 megapixels.");
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+  }
+  const base64 = btoa(binary);
+  return { base64, dataUri: `data:${file.type};base64,${base64}` };
+}
+
+function mergeAnalysisResults(primary, image) {
+  if (!primary) return image || null;
+  if (!image) return primary;
+  const unique = (items) => [...new Set(items || [])];
+  return {
+    ...primary,
+    observations: [...(primary.observations || []), ...(image.observations || [])],
+    evidence: [...(primary.evidence || []), ...(image.evidence || [])],
+    indicators: [...(primary.indicators || []), ...(image.indicators || [])],
+    limitations: unique([...(primary.limitations || []), ...(image.limitations || [])]),
+    errors: [...(primary.errors || []), ...(image.errors || [])],
+  };
+}
+
 function buildSnapshot(stage) {
   const snap = {};
   for (const [k, v] of Object.entries(stage)) {
+    if (!v || typeof v.ok !== "boolean") continue;
     snap[k] = v.ok
       ? { status: hasIncompleteResult(v) ? "partial" : "completed", data: v.data }
       : { status: "failed", error: v.error };
   }
+  snap.summary = {
+    status: "completed",
+    data: buildInvestigationSummary(stage.candidate_target || "", stage, stage.candidate_type || "auto"),
+  };
   return snap;
 }
 
+function renderInvestigationSummary(summary) {
+  const list = (items) => items.length
+    ? `<ul class="list">${items.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>`
+    : "<div class='muted'>None reported.</div>";
+  return `<div class="panel" style="margin-top:16px"><h2>Investigation summary — ${esc(summary.disposition.replaceAll("_", " "))}</h2>
+    <div class="kv">
+      <div class="k">Candidate</div><div>${esc(summary.candidate)} <span class="tag">${esc(summary.candidate_type)}</span></div>
+      <div class="k">Gate decision</div><div>${esc(summary.gate)}</div>
+      <div class="k">Rules</div><div>${esc(summary.rules)}</div>
+      <div class="k">ML prediction</div><div>${esc(summary.ml)}</div>
+      <div class="k">Risk score</div><div>${esc(summary.risk_score)}</div>
+      <div class="k">Grounded / investigator analysis</div><div>${esc(summary.ai_analysis)}</div>
+      <div class="k">Next step</div><div>${esc(summary.next_step)}</div>
+    </div><h3>Evidence sources examined</h3>${list(summary.evidence_examined)}
+    <h3>Missing evidence and limitations</h3>${list(summary.missing_evidence)}</div>`;
+}
+
 function renderInvestigation(target, stage) {
+  const summary = buildInvestigationSummary(target, stage, stage.candidate_type || "auto");
   const gate = stage.gate;
   let gateLine = "<div class='state'>Loading…</div>";
   if (gate) {
@@ -407,7 +527,11 @@ function renderInvestigation(target, stage) {
         <div class="k">Audit id</div><div class="mono">${gate.data.audit_id ?? "—"}</div>
       </div>`;
   }
-  return `
+  return `${renderInvestigationSummary(summary)}
+  ${stage.social_discovery ? stagePanel("Authorized social profile discovery", stage.social_discovery, renderSocialDiscovery) : ""}
+  ${stage.image_submission ? stagePanel("Image evidence persistence", stage.image_submission, renderImageSubmission) : ""}
+  ${stage.image_transcript_submission ? stagePanel("OCR transcript persistence", stage.image_transcript_submission, renderImageSubmission) : ""}
+  ${stage.image_vision_submission ? stagePanel("Vision observation persistence", stage.image_vision_submission, renderImageSubmission) : ""}
   <div class="panel" style="margin-top:16px">
     <h2>Stage 6 — Exclusion gate</h2>${gateLine}
   </div>
@@ -416,6 +540,24 @@ function renderInvestigation(target, stage) {
   ${stagePanel("Stage 11 — Risk × Impact", stage.risk, renderRisk)}
   ${stagePanel("Stage 12 — Grounded analysis", stage.rag, renderRag)}
   ${stagePanel("Stage 9 — Investigation findings", stage.investigate, renderInvestigate)}`;
+}
+
+function renderSocialDiscovery(data) {
+  const profiles = (data.candidates || []).map((candidate) =>
+    `<li><b>${esc(candidate.target)}</b> · ${esc(candidate.source)} · ${fmtDate(candidate.discovered_at)}<br>
+      <span class="mono">${esc(candidate.source_reference)}</span></li>`).join("");
+  const failures = (data.failures || []).map((failure) => `<li>${esc(failure.source)}: ${esc(failure.reason)}</li>`).join("");
+  return `<div>Status: ${stageBadge(data.status)}</div>
+    ${profiles ? `<h3>Provider-returned profiles</h3><ul class="list">${profiles}</ul>` : "<div class='muted'>No profile was returned by a configured provider.</div>"}
+    ${failures ? `<h3>Provider status</h3><ul class="list">${failures}</ul>` : ""}
+    <div class="muted">Registry similarity is not proof that the external profile was retrieved.</div>`;
+}
+
+function renderImageSubmission(data) {
+  if (!data || !data.id) return `<div class='state error'>Evidence persistence failed: ${esc(data?.error || "submission record unavailable")}</div>`;
+  return `<div class="kv"><div class="k">Submission id</div><div>#${data.id}</div>
+    <div class="k">Content hash</div><div class="mono">${esc(data.content_hash)}</div>
+    <div class="k">Stored at</div><div>${fmtDate(data.created_at)}</div></div>`;
 }
 
 function stagePanel(title, res, renderer) {
@@ -432,12 +574,26 @@ function renderEvidence(data) {
      <td>${s.observation_count} obs / ${s.indicator_count} ind</td>
      <td>${s.limitation_count} lim / ${s.error_count} err</td></tr>`).join("");
   const detail = (data.results || []).map((r) => {
+    const providerStatuses = (r.observations || []).filter((item) => item.kind === "provider_status");
+    const providerStatusPanel = providerStatuses.length
+      ? `<div class="kv">${providerStatuses.map((item) =>
+        `<div class="k">${esc(item.value.provider)} status</div><div>${stageBadge(item.value.status)}</div>`).join("")}</div>`
+      : "";
     const obs = (r.observations || []).map((o) =>
       `<li><span class="tag">${esc(o.kind)}</span> <span class="mono">${esc(JSON.stringify(o.value).slice(0, 90))}</span></li>`).join("");
+    const indicators = (r.indicators || []).map((item) =>
+      `<li><span class="tag">${esc(item.kind)}</span> ${esc(JSON.stringify(item.value))} <span class="muted">${esc(item.severity || "unknown")}</span></li>`).join("");
+    const evidence = (r.evidence || []).map((item) =>
+      `<li><b>${esc(item.evidence_type)}</b> — ${esc(item.description)} <span class="mono">${esc(JSON.stringify(item.provenance || {}))}</span></li>`).join("");
     const lim = (r.limitations || []).map((l) => `<li>${esc(l)}</li>`).join("");
+    const errors = (r.errors || []).map((e) => `<li class="state error">${esc(e.stage)}: ${esc(e.message)}</li>`).join("");
     return `<div class="section-block"><h3>${esc(r.analyzer_type)} — ${esc(r.status)}</h3>
+      ${providerStatusPanel}
       ${obs ? `<ul class="list">${obs}</ul>` : "<div class='muted' style='font-size:12.5px'>No observations.</div>"}
-      ${lim ? `<h3>Limitations</h3><ul class="list">${lim}</ul>` : ""}</div>`;
+      ${indicators ? `<h3>Extracted indicators</h3><ul class="list">${indicators}</ul>` : ""}
+      ${evidence ? `<h3>Evidence provenance</h3><ul class="list">${evidence}</ul>` : ""}
+      ${lim ? `<h3>Limitations</h3><ul class="list">${lim}</ul>` : ""}
+      ${errors ? `<h3>Errors</h3><ul class="list">${errors}</ul>` : ""}</div>`;
   }).join("");
   return `${rows ? `<table><tr><th>Analyzer</th><th>Status</th><th>Signals</th><th>Notes</th></tr>${rows}</table>` : "<div class='state'>No analyzer results.</div>"}${detail}`;
 }
@@ -496,15 +652,36 @@ function renderRag(data) {
 }
 
 function renderInvestigate(data) {
+  const researchHits = data.research_hits || [];
+  const researchFailures = (data.limitations || []).filter((item) =>
+    /brave_search|openphish|urlhaus|web research/i.test(item));
+  const braveHits = researchHits.filter((hit) => hit.source === "brave_search");
+  const searchStatus = braveHits.length
+    ? `Brave Search returned ${braveHits.length} result(s); snippets are not retrieved pages.`
+    : researchFailures.some((item) => item.startsWith("brave_search:"))
+      ? "Brave Search unavailable or failed; see provider details."
+      : "No Brave Search result was returned; an empty result does not establish safety.";
+  const research = researchHits.map((hit) => `<li>
+    <b>${esc(hit.title || hit.source)}</b> <span class="tag">${esc(hit.content_kind || "provider_record")}</span><br>
+    ${hit.snippet ? `<span>${esc(hit.snippet)}</span><br>` : `<span>${esc(hit.summary)}</span><br>`}
+    <span class="mono">${esc(hit.url)}</span> · ${fmtDate(hit.retrieved_at)} ·
+    ${hit.page_content_retrieved ? "page content retrieved" : "result metadata only; page not fetched"}
+  </li>`).join("");
   const findings = (data.findings || []).map((f) => {
     const cites = (f.citations || []).map((c) => `<code>${esc(c.reference)}</code>`).join(" ");
     return `<li>${esc(f.finding)} ${cites}</li>`;
   }).join("");
   if (!findings) {
     return `<div class="kv"><div class="k">Status</div><div>${stageBadge(data.status)}</div></div>
+      <div><b>Web search status:</b> ${esc(searchStatus)}</div>
+      ${researchHits.length ? `<h3>Search and feed results</h3><ul class="list">${research}</ul>` : ""}
       <ul class="list">${(data.limitations || []).map((l) => `<li>${esc(l)}</li>`).join("")}</ul>`;
   }
-  return `<div style="margin-bottom:8px">Status: ${stageBadge(data.status)}</div><ul class="list">${findings}</ul>`;
+  return `<div style="margin-bottom:8px">Status: ${stageBadge(data.status)}</div>
+    <div><b>Web search status:</b> ${esc(searchStatus)}</div>
+    ${researchHits.length ? `<h3>Search and feed results</h3><ul class="list">${research}</ul>` : ""}
+    <h3>Cited findings</h3><ul class="list">${findings}</ul>
+    ${(data.limitations || []).length ? `<h3>Provider limitations</h3><ul class="list">${data.limitations.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>` : ""}`;
 }
 
 /* ---------- cases ---------- */
@@ -569,10 +746,11 @@ async function showCaseDetail(id) {
   el.style.display = "block";
   el.innerHTML = "<div class='state'>Loading…</div>";
   try {
-    const c = await api(`/cases/${id}`);
+    const [c, report] = await Promise.all([api(`/cases/${id}`), api(`/cases/${id}/report`)]);
+    const summary = report.snapshot?.summary?.data;
     const events = (c.events || []).map((e) =>
       `<li><span class="tag">${esc(e.event_type)}</span> <b>${esc(e.actor)}</b> · ${fmtDate(e.created_at)}<br>${esc(e.note)}</li>`).join("");
-    el.innerHTML = `<h2>Case #${c.id} — ${esc(c.title)}</h2>
+    el.innerHTML = `${summary ? renderInvestigationSummary(summary) : ""}<h2>Case #${c.id} — ${esc(c.title)}</h2>
       <div class="kv">
         <div class="k">Target</div><div class="mono">${esc(c.target)}</div>
         <div class="k">Status</div><div>${statusBadge(c.status)}</div>
@@ -799,5 +977,6 @@ if (runBenchBtn) {
 }
 
 /* ---------- init ---------- */
-loadDashboard();
+if (requestedViewButton) requestedViewButton.click();
+else loadDashboard();
 

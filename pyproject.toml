@@ -28,9 +28,13 @@ dev = [
     "pytest>=8,<10",
     "ruff>=0.9,<1",
 ]
+ocr = [
+    "Pillow>=10,<13",
+    "pytesseract>=0.3.13,<1",
+]
 
 [tool.setuptools.package-data]
-risk_radar = ["static/*.html", "static/*.js"]
+risk_radar = ["static/*.html", "static/*.js", "static/*.css"]
 
 [tool.setuptools.packages.find]
 where = ["src", "."]

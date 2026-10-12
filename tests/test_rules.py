@@ -30,8 +30,10 @@ def _evaluate(client: TestClient, **payload) -> dict:
     return response.json()
 
 
-def test_verified_official_never_reaches_rule_evaluation(client: TestClient) -> None:
-    """Outcome 1 is blocked before any rule runs and stays audited."""
+def test_verified_official_never_reaches_rules_or_duplicates_gate_audit(
+    client: TestClient,
+) -> None:
+    """Internal safety rechecks do not create duplicate gate audit records."""
     _seed(client)
 
     result = _evaluate(client, target="http://acme.example/login")
@@ -41,6 +43,9 @@ def test_verified_official_never_reaches_rule_evaluation(client: TestClient) -> 
     assert result["not_matched"] == [] and result["skipped"] == []
     assert result["gate_decision"]["outcome"] == "verified_official"
     assert result["gate_decision"]["alert_eligible"] is False
+    assert client.get("/api/v1/gate/audit").json() == []
+    gate = client.post("/api/v1/gate/evaluate", json={"target": "http://acme.example/login"})
+    assert gate.json()["outcome"] == "verified_official"
     assert client.get("/api/v1/gate/audit").json()[0]["decision"] == "verified_official"
 
 

@@ -14,6 +14,7 @@ fabricates OCR text, logo matches or image contents.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import Any, Protocol
 
@@ -195,6 +196,18 @@ class ImageAnalyzer:
                 status="failed",
                 input_id=input_id,
                 investigation_id=investigation_id,
+                observations=[
+                    signal_observation(
+                        "provider_status",
+                        {"provider": "local_ocr", "status": "not_run_no_input"},
+                        "provider_execution",
+                    ),
+                    signal_observation(
+                        "provider_status",
+                        {"provider": "vision", "status": "not_run_no_input"},
+                        "provider_execution",
+                    ),
+                ],
                 errors=[{"stage": "input", "message": "no image bytes supplied"}],
                 limitations=["no image bytes supplied: nothing to analyze"],
             )
@@ -211,83 +224,173 @@ class ImageAnalyzer:
 
         limitations: list[str] = []
 
-        # 1) Legacy OCR backend (if injected) takes precedence. It is a local
-        #    function without the vision API's format/size constraints, so no
-        #    image-format validation is applied here.
-        if self._ocr is not None:
-            extracted = self._ocr.extract_text(image)
-            if extracted is None:
-                return self._unavailable(
-                    input_id, input_type, investigation_id, evidence, limitations
-                )
-            return self._completed(
-                extracted,
-                "ocr_backend",
-                input_id,
-                input_type,
-                investigation_id,
-                evidence,
-                limitations,
-            )
-
-        # 2) Optional vision provider. Validate format/size before the network
-        #    call (untrusted input); any problem blocks the call and fails
-        #    explicitly rather than guessing.
         media_type, problems = validate_image(image)
         if problems:
+            unavailable = any("decoder unavailable" in problem for problem in problems)
             return build_result(
                 analyzer_type="image",
                 input_type=input_type,
-                status="failed",
+                status="unavailable" if unavailable else "failed",
                 input_id=input_id,
                 investigation_id=investigation_id,
+                observations=[
+                    signal_observation(
+                        "provider_status",
+                        {
+                            "provider": "local_ocr",
+                            "status": "not_run_image_validation_failed",
+                        },
+                        "provider_execution",
+                    ),
+                    signal_observation(
+                        "provider_status",
+                        {"provider": "vision", "status": "not_run_image_validation_failed"},
+                        "provider_execution",
+                    ),
+                ],
                 evidence=evidence,
                 errors=[{"stage": "validate", "message": problem} for problem in problems],
                 limitations=problems,
             )
 
+        evidence.append(
+            evidence_record(
+                input_id,
+                "validated_image",
+                "image content decoded successfully",
+                method="pillow_image_decode",
+                media_type=media_type,
+                sha256=hashlib.sha256(image).hexdigest(),
+            )
+        )
+
+        result = None
+        ocr_status = "unavailable"
+        ocr_error = None
+        if self._ocr is not None:
+            try:
+                extracted = self._ocr.extract_text(image)
+            except Exception as exc:  # noqa: BLE001 - OCR is optional and failure is explicit
+                ocr_status = "error"
+                limitations.append("configured OCR backend failed; no text was fabricated")
+                ocr_error = {"stage": "ocr", "message": exc.__class__.__name__}
+            else:
+                if extracted is not None:
+                    ocr_status = "completed" if extracted.strip() else "empty"
+                    backend_name = getattr(self._ocr, "name", "local_ocr")
+                    result = self._completed(
+                        extracted,
+                        f"ocr:{backend_name}",
+                        input_id,
+                        input_type,
+                        investigation_id,
+                        evidence,
+                        limitations,
+                        media_type=media_type,
+                    )
+                else:
+                    ocr_status = "empty"
+                    limitations.append("OCR backend returned no text; no text was fabricated")
+        else:
+            limitations.append("local OCR provider unavailable or not configured")
+
+        # Vision is a second, separately attributed observation source. It runs
+        # alongside local OCR when both are configured; neither authenticates
+        # identities observed in pixels.
+        vision_status = "unavailable"
+        vision_error = None
         if self._vision is not None and media_type is not None:
             try:
                 extracted = self._vision.extract_text(image, media_type)
             except VisionError as exc:
-                return build_result(
-                    analyzer_type="image",
-                    input_type=input_type,
-                    status="unavailable",
-                    input_id=input_id,
-                    investigation_id=investigation_id,
-                    evidence=evidence,
-                    errors=[{"stage": "vision", "message": str(exc)}],
-                    limitations=limitations
-                    + ["vision provider failed: no text was extracted and none was fabricated"],
-                )
+                vision_error = {"stage": "vision", "message": str(exc)}
+                limitations.append("vision provider failed; no model observation was fabricated")
             except Exception as exc:  # noqa: BLE001 - timeouts or unexpected failures
-                return build_result(
-                    analyzer_type="image",
-                    input_type=input_type,
-                    status="unavailable",
-                    input_id=input_id,
-                    investigation_id=investigation_id,
-                    evidence=evidence,
-                    errors=[{"stage": "vision", "message": exc.__class__.__name__}],
-                    limitations=limitations
-                    + [
-                        f"vision provider error ({exc.__class__.__name__}): no text "
-                        "was extracted and none was fabricated"
-                    ],
+                vision_error = {"stage": "vision", "message": exc.__class__.__name__}
+                limitations.append(
+                    f"vision provider error ({exc.__class__.__name__}); "
+                    "no model observation was fabricated"
                 )
-            return self._completed(
-                extracted,
-                f"vision:{self._vision.name}",
-                input_id,
-                input_type,
-                investigation_id,
-                evidence,
-                limitations,
-                media_type=media_type,
-            )
+            else:
+                if isinstance(extracted, str) and extracted.strip():
+                    vision_status = "completed"
+                    provider_name = getattr(self._vision, "name", "vision_provider")
+                    if result is None:
+                        result = self._unavailable(
+                            input_id, input_type, investigation_id, evidence, limitations
+                        )
+                        result.observations.append(
+                            signal_observation("media_type", media_type, "image_validation")
+                        )
+                    result.observations.append(
+                        signal_observation(
+                            "vision_model_observation",
+                            extracted.strip()[:20_000],
+                            f"vision:{provider_name}",
+                            unverified=True,
+                        )
+                    )
+                    model_text = TextAnalyzer().analyze(
+                        extracted,
+                        input_id=input_id,
+                        input_type="vision_model_observation",
+                        investigation_id=investigation_id,
+                    )
+                    for observation in model_text.observations:
+                        normalized = dict(observation)
+                        normalized["method"] = f"vision_text_parse:{provider_name}"
+                        normalized["unverified"] = True
+                        result.observations.append(normalized)
+                    for indicator in model_text.indicators:
+                        normalized_indicator = dict(indicator)
+                        normalized_indicator["source_provider"] = provider_name
+                        normalized_indicator["unverified"] = True
+                        result.indicators.append(normalized_indicator)
+                    result.evidence.append(
+                        evidence_record(
+                            input_id,
+                            "vision_model_observation",
+                            "Vision model returned an unverified visual description",
+                            method=f"vision:{provider_name}",
+                            provider=provider_name,
+                            media_type=media_type,
+                        )
+                    )
+                else:
+                    vision_status = "empty"
+                    limitations.append("vision provider returned no usable observations")
+        else:
+            limitations.append("vision AI provider unavailable or not configured")
 
-        return self._unavailable(input_id, input_type, investigation_id, evidence, limitations)
+        if result is None:
+            result = self._unavailable(
+                input_id, input_type, investigation_id, evidence, limitations
+            )
+        result.observations.extend(
+            [
+                signal_observation(
+                    "provider_status",
+                    {"provider": "local_ocr", "status": ocr_status},
+                    "provider_execution",
+                ),
+                signal_observation(
+                    "provider_status",
+                    {"provider": "vision", "status": vision_status},
+                    "provider_execution",
+                ),
+            ]
+        )
+        successful_providers = sum(
+            provider_status == "completed" for provider_status in (ocr_status, vision_status)
+        )
+        if successful_providers:
+            result.status = "completed" if successful_providers == 2 else "partial"
+        result.limitations = list(dict.fromkeys(result.limitations + limitations))
+        if ocr_error:
+            result.errors.append(ocr_error)
+        if vision_error:
+            result.errors.append(vision_error)
+        return result
 
     @staticmethod
     def _unavailable(input_id, input_type, investigation_id, evidence, limitations):
@@ -317,7 +420,11 @@ class ImageAnalyzer:
         limitations,
         media_type=None,
     ):
-        observations = [signal_observation("ocr_text", extracted, method)]
+        raw_text = extracted.strip()
+        clean_text = raw_text[:20_000]
+        observations = (
+            [signal_observation("ocr_text", clean_text, method)] if clean_text else []
+        )
         if media_type:
             observations.append(signal_observation("media_type", media_type, "image_validation"))
         # Provenance: record which observation came from the image itself.
@@ -325,12 +432,30 @@ class ImageAnalyzer:
             evidence_record(
                 input_id,
                 "ocr",
-                f"extracted {len(extracted)} characters from image via {method}",
+                f"extracted {len(clean_text)} characters from image via {method}",
                 method=method,
-                chars=len(extracted),
+                chars=len(clean_text),
                 **({"media_type": media_type} if media_type else {}),
             )
         )
+        limitations = list(limitations)
+        if len(raw_text) > len(clean_text):
+            limitations.append(
+                "OCR transcript was truncated to the 20,000-character analysis limit"
+            )
+        indicators: list[dict[str, Any]] = []
+        if clean_text:
+            text_result = TextAnalyzer().analyze(
+                clean_text,
+                input_id=input_id,
+                input_type="ocr_text",
+                investigation_id=investigation_id,
+            )
+            observations.extend(text_result.observations)
+            indicators.extend(text_result.indicators)
+            evidence.extend(text_result.evidence)
+        else:
+            limitations.append("OCR completed but no text was extracted; this is inconclusive")
         return build_result(
             analyzer_type="image",
             input_type=input_type,
@@ -338,7 +463,10 @@ class ImageAnalyzer:
             input_id=input_id,
             investigation_id=investigation_id,
             observations=observations,
+            indicators=indicators,
             evidence=evidence,
-            assessment=assessment_from_reasons(["ocr_text"], confidence=1.0),
+            assessment=assessment_from_reasons(
+                ["ocr_text"] if clean_text else [], confidence=1.0 if clean_text else None
+            ),
             limitations=limitations,
         )

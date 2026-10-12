@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from risk_radar.api.v1.brands import router as brands_router
@@ -19,6 +20,7 @@ from risk_radar.api.v1.health import router as health_router
 from risk_radar.api.v1.investigate import router as investigate_router
 from risk_radar.api.v1.ml import router as ml_router
 from risk_radar.api.v1.monitoring import router as monitoring_router
+from risk_radar.api.v1.providers import router as providers_router
 from risk_radar.api.v1.rag import router as rag_router
 from risk_radar.api.v1.review import router as review_router
 from risk_radar.api.v1.risk import router as risk_router
@@ -109,8 +111,22 @@ app.include_router(ml_router, prefix="/api/v1")
 app.include_router(investigate_router, prefix="/api/v1")
 app.include_router(correlate_router, prefix="/api/v1")
 app.include_router(monitoring_router, prefix="/api/v1")
+app.include_router(providers_router, prefix="/api/v1")
 
 # Serve the single-page dashboard (static, no build step).
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 if _STATIC_DIR.is_dir():
+    @app.get("/", include_in_schema=False)
+    def landing_page():
+        return FileResponse(_STATIC_DIR / "landing.html")
+
+    @app.get("/project", include_in_schema=False)
+    def project_page():
+        return FileResponse(_STATIC_DIR / "project.html")
+
+    @app.get("/app", include_in_schema=False)
+    @app.get("/dashboard", include_in_schema=False)
+    def dashboard_page():
+        return FileResponse(_STATIC_DIR / "index.html")
+
     app.mount("/", StaticFiles(directory=_STATIC_DIR, html=True), name="static")

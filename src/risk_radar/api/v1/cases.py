@@ -15,7 +15,8 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import case as sql_case
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from risk_radar.db.models import Case, CaseEvent, CaseStatus
@@ -295,17 +296,29 @@ class DashboardSummary(BaseModel):
 @router.get("/dashboard", response_model=DashboardSummary, summary="Dashboard summary")
 def dashboard_summary(db: Annotated[Session, Depends(get_db)]) -> DashboardSummary:
     """Return real case counts and recent cases for the dashboard."""
-    cases = list(db.scalars(select(Case).order_by(Case.id.desc()).limit(200)).all())
-    if not cases:
+    totals = db.execute(
+        select(
+            func.count(Case.id),
+            func.coalesce(func.sum(sql_case((Case.status == "open", 1), else_=0)), 0),
+            func.coalesce(func.sum(sql_case((Case.status == "in_review", 1), else_=0)), 0),
+            func.coalesce(func.sum(sql_case((Case.status == "closed", 1), else_=0)), 0),
+            func.coalesce(func.sum(sql_case((Case.alert_eligible.is_(True), 1), else_=0)), 0),
+            func.coalesce(
+                func.sum(sql_case((Case.gate_outcome == "verified_official", 1), else_=0)), 0
+            ),
+        )
+    ).one()
+    recent = list(db.scalars(select(Case).order_by(Case.id.desc()).limit(10)).all())
+    if not totals[0]:
         # Explicit empty state: no fabricated numbers.
         return DashboardSummary(data_available=True, recent_cases=[])
     return DashboardSummary(
-        total_cases=len(cases),
-        open_cases=sum(1 for c in cases if c.status == "open"),
-        in_review_cases=sum(1 for c in cases if c.status == "in_review"),
-        closed_cases=sum(1 for c in cases if c.status == "closed"),
-        alert_eligible_cases=sum(1 for c in cases if c.alert_eligible),
-        verified_official_cases=sum(1 for c in cases if c.gate_outcome == "verified_official"),
-        recent_cases=[_case_with_events(db, c) for c in cases[:10]],
+        total_cases=totals[0],
+        open_cases=totals[1],
+        in_review_cases=totals[2],
+        closed_cases=totals[3],
+        alert_eligible_cases=totals[4],
+        verified_official_cases=totals[5],
+        recent_cases=[_case_with_events(db, c) for c in recent],
         data_available=True,
     )

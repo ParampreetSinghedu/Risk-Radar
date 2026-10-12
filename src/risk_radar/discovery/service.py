@@ -2,14 +2,16 @@
 
 from pydantic import BaseModel, Field
 
-from risk_radar.core.config import get_settings
+from risk_radar.core.config import Settings, get_settings
 from risk_radar.discovery.base import Candidate, ConnectorError, DiscoveryConnector
+from risk_radar.discovery.connectors.brave_search import BraveSearchConnector
+from risk_radar.discovery.connectors.exa import ExaSearchConnector
 from risk_radar.discovery.connectors.openphish import OpenPhishConnector
 from risk_radar.discovery.connectors.stubs import (
     AppStoreConnector,
     SocialPlatformConnector,
-    WebSearchConnector,
 )
+from risk_radar.discovery.connectors.tavily import TavilySearchConnector
 from risk_radar.discovery.connectors.urlhaus import URLhausConnector
 
 
@@ -69,6 +71,24 @@ class DiscoveryService:
         return DiscoveryResult(query=query, candidates=deduplicate(collected), failures=failures)
 
 
+def configured_search_connector(settings: Settings | None = None) -> DiscoveryConnector:
+    """Build the single selected search adapter; no key means no outbound call."""
+    settings = settings or get_settings()
+    provider = settings.search_provider
+    if provider == "tavily":
+        key = settings.tavily_api_key.get_secret_value() if settings.tavily_api_key else None
+        return TavilySearchConnector(key, timeout=settings.search_provider_timeout_seconds)
+    if provider == "exa":
+        key = settings.exa_api_key.get_secret_value() if settings.exa_api_key else None
+        return ExaSearchConnector(key, timeout=settings.search_provider_timeout_seconds)
+    key = (
+        settings.brave_search_api_key.get_secret_value()
+        if settings.brave_search_api_key
+        else None
+    )
+    return BraveSearchConnector(key, timeout=settings.brave_search_timeout_seconds)
+
+
 def default_connectors() -> list[DiscoveryConnector]:
     """Build the default connector registry from current configuration."""
     settings = get_settings()
@@ -76,7 +96,7 @@ def default_connectors() -> list[DiscoveryConnector]:
     return [
         URLhausConnector(auth_key=auth_key),
         OpenPhishConnector(),
-        WebSearchConnector(),
+        configured_search_connector(settings),
         SocialPlatformConnector(),
         AppStoreConnector(),
     ]
