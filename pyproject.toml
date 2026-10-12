@@ -29,16 +29,20 @@ dev = [
     "ruff>=0.9,<1",
 ]
 
+[tool.setuptools.package-data]
+risk_radar = ["static/*.html", "static/*.js"]
+
 [tool.setuptools.packages.find]
-where = ["src"]
-include = ["risk_radar*"]
+where = ["src", "."]
+include = ["risk_radar*", "app*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 addopts = "-ra"
 
 [tool.ruff]
+extend-exclude = ["app"]
 line-length = 100
 target-version = "py312"
 src = ["src", "tests"]

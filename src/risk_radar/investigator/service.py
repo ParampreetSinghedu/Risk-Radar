@@ -44,7 +44,7 @@ class InvestigationRequest(BaseModel):
     """One read-only investigation request."""
 
     target: str = Field(min_length=1, max_length=2048)
-    kind: Literal["auto", "domain", "handle", "name"] = "auto"
+    kind: Literal["auto", "domain", "handle", "name", "application"] = "auto"
     analysis: AnalyzerEvidence | None = None
     candidate_ref: str | None = Field(default=None, max_length=255)
 
@@ -137,7 +137,7 @@ class InvestigatorService:
                 limitations=limitations
                 + [
                     "LLM provider is not configured (set LLM_PROVIDER and "
-                    "ANTHROPIC_API_KEY): no findings were generated"
+                    "APINEX_API_KEY or ANTHROPIC_API_KEY): no findings were generated"
                 ],
                 errors=errors,
             )

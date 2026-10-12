@@ -20,7 +20,7 @@ class GateEvaluateRequest(BaseModel):
     """One target to evaluate against official brand assets."""
 
     target: str = Field(min_length=1, max_length=2048)
-    kind: Literal["auto", "domain", "handle", "name"] = "auto"
+    kind: Literal["auto", "domain", "handle", "name", "application"] = "auto"
     analysis: AnalyzerEvidence | None = None
 
 

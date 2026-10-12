@@ -3,7 +3,16 @@
 from datetime import UTC, datetime
 from enum import StrEnum
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from risk_radar.db.base import Base
@@ -95,5 +104,180 @@ class ExclusionAuditLog(Base):
     analyzer_input_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     alert_eligible: Mapped[bool] = mapped_column(Boolean, nullable=False)
     decided_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
+class CaseStatus(StrEnum):
+    """Workflow states for a Stage 13 case."""
+
+    OPEN = "open"
+    IN_REVIEW = "in_review"
+    CLOSED = "closed"
+
+
+class Case(Base):
+    """A triaged investigation case grouping evidence for analyst review (Stage 13)."""
+
+    __tablename__ = "cases"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    target: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default=CaseStatus.OPEN)
+    # Gate outcome captured when the case was created (never trusted from client).
+    gate_outcome: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    alert_eligible: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # JSON blob holding the stored stage results snapshot (evidence/risk/etc).
+    snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
+class CaseEvent(Base):
+    """Append-only analyst decision / note on a case (Stage 13 human review)."""
+
+    __tablename__ = "case_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    case_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("cases.id"), nullable=False, index=True
+    )
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    note: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    actor: Mapped[str] = mapped_column(String(64), nullable=False, default="analyst")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
+class ReviewVerdict(StrEnum):
+    """Supported analyst review verdicts (Stage 14)."""
+
+    MALICIOUS = "malicious"
+    BENIGN = "benign"
+    SUSPICIOUS = "suspicious"
+
+
+class HumanReview(Base):
+    """Audited human analyst review verdict and feedback loop (Stage 14)."""
+
+    __tablename__ = "human_reviews"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    case_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("cases.id"), nullable=True, index=True
+    )
+    target: Mapped[str] = mapped_column(Text, nullable=False)
+    verdict: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    analyst: Mapped[str] = mapped_column(String(64), nullable=False, default="analyst")
+    tags: Mapped[str | None] = mapped_column(Text, nullable=True)
+    features_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    label: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+
+
+class MonitoringTarget(Base):
+    """Persisted configuration and scheduling state for one monitored identity."""
+
+    __tablename__ = "monitoring_targets"
+    __table_args__ = (
+        CheckConstraint(
+            "interval_seconds >= 60 AND interval_seconds <= 2592000", name="ck_monitoring_interval"
+        ),
+        UniqueConstraint("target_type", "target", name="uq_monitoring_target_identity"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    brand_id: Mapped[int | None] = mapped_column(ForeignKey("brands.id"), nullable=True, index=True)
+    target_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    target: Mapped[str] = mapped_column(Text, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    removed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    interval_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=3600)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    next_check_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    last_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    check_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    last_status: Mapped[str] = mapped_column(String(24), nullable=False, default="never_checked")
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class MonitoringCheck(Base):
+    """One durable attempt to check a monitoring target."""
+
+    __tablename__ = "monitoring_checks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    target_id: Mapped[int] = mapped_column(
+        ForeignKey("monitoring_targets.id"), nullable=False, index=True
+    )
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    providers_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    result_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class MonitoringObservation(Base):
+    """Latest observed version of a stable finding key for change comparison."""
+
+    __tablename__ = "monitoring_observations"
+    __table_args__ = (
+        UniqueConstraint("target_id", "observation_key", name="uq_monitor_observation_key"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    target_id: Mapped[int] = mapped_column(
+        ForeignKey("monitoring_targets.id"), nullable=False, index=True
+    )
+    observation_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    source: Mapped[str] = mapped_column(String(128), nullable=False)
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_check_id: Mapped[int] = mapped_column(ForeignKey("monitoring_checks.id"), nullable=False)
+
+
+class MonitoringAlert(Base):
+    """Actionable, persisted change associated with its check and observation."""
+
+    __tablename__ = "monitoring_alerts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    target_id: Mapped[int] = mapped_column(
+        ForeignKey("monitoring_targets.id"), nullable=False, index=True
+    )
+    check_id: Mapped[int] = mapped_column(
+        ForeignKey("monitoring_checks.id"), nullable=False, index=True
+    )
+    observation_id: Mapped[int] = mapped_column(
+        ForeignKey("monitoring_observations.id"), nullable=False, index=True
+    )
+    change_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_json: Mapped[str] = mapped_column(Text, nullable=False)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    acknowledged_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_utcnow
     )

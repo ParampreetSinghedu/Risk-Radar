@@ -17,7 +17,7 @@ class RuleEvaluateRequest(BaseModel):
     """Candidate to evaluate. Gate eligibility is never accepted from clients."""
 
     target: str = Field(min_length=1, max_length=2048)
-    kind: Literal["auto", "domain", "handle", "name"] = "auto"
+    kind: Literal["auto", "domain", "handle", "name", "application"] = "auto"
     analysis: AnalyzerEvidence | None = None
     candidate_ref: str | None = Field(default=None, max_length=255)
 

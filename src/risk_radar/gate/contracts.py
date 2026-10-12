@@ -21,7 +21,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 AnalyzerStatus = Literal["completed", "partial", "unavailable", "failed"]
-IdentityKind = Literal["domain", "handle", "name"]
+IdentityKind = Literal["domain", "handle", "name", "application"]
 _USABLE_STATUSES = {"completed", "partial"}
 
 
@@ -45,7 +45,7 @@ class AnalyzerEvidence(BaseModel):
     """Stage 5 analyzer output accepted by the Stage 6 gate."""
 
     schema_version: str = "1.0"
-    analyzer_type: Literal["url", "brand_profile", "image", "text"]
+    analyzer_type: Literal["url", "brand_profile", "image", "text", "application"]
     status: AnalyzerStatus
     source_reference: SourceReference
     observations: list[dict[str, Any]] = Field(default_factory=list)
@@ -88,7 +88,7 @@ def claimed_identities(evidence: AnalyzerEvidence) -> tuple[list[ClaimedIdentity
     for observation in evidence.observations:
         kind = observation.get("kind")
         value = observation.get("value")
-        valid_kind = kind in {"domain", "handle", "name"}
+        valid_kind = kind in {"domain", "handle", "name", "application"}
         if not valid_kind or not isinstance(value, str) or not value.strip():
             skipped += 1
             continue

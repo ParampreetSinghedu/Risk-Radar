@@ -12,7 +12,7 @@ from risk_radar.db.models import Brand, BrandAsset, ExclusionAuditLog
 from risk_radar.gate.contracts import AnalyzerEvidence, ClaimedIdentity, claimed_identities
 
 Outcome = Literal["verified_official", "unverified", "not_matched"]
-Kind = Literal["auto", "domain", "handle", "name"]
+Kind = Literal["auto", "domain", "handle", "name", "application"]
 
 # Where each outcome goes next. Only "not_matched" reaches detection.
 NEXT_STAGE: dict[str, str | None] = {
@@ -26,6 +26,7 @@ _ASSET_TYPES: dict[str, tuple[str, ...]] = {
     "domain": ("domain",),
     "handle": ("account",),
     "name": ("name",),
+    "application": ("application",),
 }
 
 

@@ -2,6 +2,7 @@
 .env
 .venv/
 venv/
+*.db
 
 # Python
 __pycache__/

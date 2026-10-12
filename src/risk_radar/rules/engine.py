@@ -88,6 +88,7 @@ class RuleContext(BaseModel):
     official_domains: list[dict[str, Any]] = Field(default_factory=list)
     official_handles: list[dict[str, Any]] = Field(default_factory=list)
     official_names: list[str] = Field(default_factory=list)
+    official_applications: list[dict[str, Any]] = Field(default_factory=list)
     observations: list[dict[str, Any]] = Field(default_factory=list)
 
 
@@ -416,6 +417,61 @@ def rule_logo_publisher_mismatch(context: RuleContext) -> RuleFinding | RuleNote
     )
 
 
+def rule_application_similarity(context: RuleContext) -> RuleFinding | RuleNote:
+    """Compare extracted app identifiers with official application assets."""
+    if context.kind != "application":
+        return RuleNote(
+            rule_id="application_similarity",
+            title="Application identity similarity",
+            status="skipped",
+            reason="candidate is not an application listing",
+        )
+    candidate = next(
+        (
+            str(item["value"])
+            for item in context.observations
+            if item.get("kind") == "application" and isinstance(item.get("value"), str)
+        ),
+        None,
+    )
+    if candidate is None:
+        return RuleNote(
+            rule_id="application_similarity",
+            title="Application identity similarity",
+            status="skipped",
+            reason="no parsed application identifier was available",
+        )
+    best: tuple[float, dict[str, Any]] | None = None
+    for asset in context.official_applications:
+        expected = str(asset["value"])
+        similarity = _ratio(candidate.lower(), expected.lower())
+        if candidate.lower() != expected.lower() and similarity >= 0.85:
+            if best is None or similarity > best[0]:
+                best = (similarity, asset)
+    if best is None:
+        return RuleNote(
+            rule_id="application_similarity",
+            title="Application identity similarity",
+            status="not_matched",
+            reason="no registered application identifier met the similarity threshold",
+        )
+    similarity, asset = best
+    return RuleFinding(
+        rule_id="application_similarity",
+        title="Application identity similarity",
+        severity="medium",
+        reason=(
+            f"submitted application identifier resembles registered {asset['brand']} "
+            f"application asset (heuristic similarity {similarity:.2f}); review is required"
+        ),
+        evidence_refs=["target", f"brand_asset:{asset['id']}", "analysis"],
+        observed_value=candidate,
+        expected_value=str(asset["value"]),
+        confidence=round(min(0.89, similarity * 0.85), 4),
+        provenance={"method": "difflib.SequenceMatcher.ratio", "verified_asset": asset["verified"]},
+    )
+
+
 RULE_REGISTRY = [
     rule_lookalike_domain,
     rule_username_similarity,
@@ -423,6 +479,7 @@ RULE_REGISTRY = [
     rule_suspicious_url_structure,
     rule_newly_registered_domain,
     rule_logo_publisher_mismatch,
+    rule_application_similarity,
 ]
 
 
@@ -431,6 +488,7 @@ def _build_context(
     target: str,
     kind: str,
     analysis: AnalyzerEvidence | None,
+    brand_id: int | None = None,
 ) -> tuple[RuleContext, list[str]]:
     """Load Stage 1 official assets and usable analyzer observations."""
     identity_kind, needle = extract_identity(target, kind)  # type: ignore[arg-type]
@@ -443,11 +501,14 @@ def _build_context(
     if host is None and identity_kind == "domain":
         host = needle
 
-    rows = db.execute(
+    asset_query = (
         select(BrandAsset, Brand)
         .join(Brand, Brand.id == BrandAsset.brand_id)
         .order_by(BrandAsset.id)
-    ).all()
+    )
+    if brand_id is not None:
+        asset_query = asset_query.where(Brand.id == brand_id)
+    rows = db.execute(asset_query).all()
     official_domains = [
         {"id": asset.id, "value": asset.value, "brand": brand.name}
         for asset, brand in rows
@@ -462,6 +523,11 @@ def _build_context(
         {brand.name for _, brand in rows}
         | {asset.value for asset, _ in rows if asset.asset_type == "name"}
     )
+    official_applications = [
+        {"id": asset.id, "value": asset.value, "brand": brand.name, "verified": asset.verified}
+        for asset, brand in rows
+        if asset.asset_type == "application"
+    ]
 
     if analysis is not None:
         observations, limitations = usable_observations(analysis)
@@ -475,6 +541,7 @@ def _build_context(
         official_domains=official_domains,
         official_handles=official_handles,
         official_names=official_names,
+        official_applications=official_applications,
         observations=observations,
     )
     return context, limitations
@@ -490,6 +557,7 @@ class RuleEngine:
         kind: str = "auto",
         analysis: AnalyzerEvidence | None = None,
         candidate_ref: str | None = None,
+        brand_id: int | None = None,
     ) -> RuleEvaluation:
         """Evaluate rules after an authoritative, server-side gate decision."""
         ref = (candidate_ref or target)[:255]
@@ -528,7 +596,7 @@ class RuleEngine:
                 ],
             )
 
-        context, analysis_limitations = _build_context(db, target, kind, analysis)
+        context, analysis_limitations = _build_context(db, target, kind, analysis, brand_id)
         findings: list[RuleFinding] = []
         not_matched: list[RuleNote] = []
         skipped: list[RuleNote] = []
