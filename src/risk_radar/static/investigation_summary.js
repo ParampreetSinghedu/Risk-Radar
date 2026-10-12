@@ -9,6 +9,16 @@
     return [...new Set(values.filter((value) => typeof value === "string" && value.trim()))];
   }
 
+  function cite(item) {
+    const citations = Array.isArray(item?.citations) ? item.citations : [];
+    return citations.map((citation) => {
+      const reference = citation.doc_id || citation.reference || citation.url || citation.source_reference;
+      const locator = citation.locator || citation.section || citation.page;
+      const source = citation.source_type;
+      return [source, reference, locator].filter((part) => typeof part === "string" && part.trim()).join(" · ");
+    }).filter(Boolean);
+  }
+
   function buildInvestigationSummary(target, stage, candidateType = "auto") {
     const gateResult = dataFor(stage, "gate");
     const evidenceResult = dataFor(stage, "evidence");
@@ -19,6 +29,13 @@
     const socialDiscovery = dataFor(stage, "social_discovery");
     const monitoring = dataFor(stage, "monitoring");
     const evidence = evidenceResult?.results || [];
+    const displayValue = (value) => {
+      const text = typeof value === "string" ? value
+        : Array.isArray(value) ? value.join(", ")
+          : value && typeof value === "object" ? JSON.stringify(value)
+            : String(value ?? "observed");
+      return text.length > 180 ? `${text.slice(0, 177)}…` : text;
+    };
     const examined = [];
     for (const result of evidence) {
       const sources = (result.evidence || []).flatMap((item) => [
@@ -57,6 +74,18 @@
       investigationResult?.gate_decision?.reason || "No gate decision was returned.";
 
     const findings = rulesResult?.findings || [];
+    const observedIndicators = evidence.flatMap((result) => {
+      const observationText = (item, label) => {
+        const provenance = unique([item.source, item.method, item.provenance?.source, item.provenance?.method]);
+        const source = provenance.length ? ` [${provenance.join(" / ")}]` : "";
+        return `${result.analyzer_type || "analyzer"} · ${item.kind || label}${source}: ${displayValue(item.value)}`;
+      };
+      return [
+        ...(result.indicators || []).map((item) => observationText(item, "Indicator")),
+        ...(result.observations || []).filter((item) => item.kind !== "provider_status")
+          .map((item) => observationText(item, "Observation")),
+      ];
+    });
     let ruleConclusion;
     if (!rulesResult || rulesResult.status === "failed_closed") {
       ruleConclusion = "Rules could not be evaluated; this is not a no-match result.";
@@ -87,6 +116,29 @@
     const acceptedRag = ragResult?.claims || [];
     const rejectedCount = (ragResult?.rejected_claims || []).length;
     const investigatorFindings = investigationResult?.findings || [];
+    const citedClaims = acceptedRag.map((item) => ({
+      text: item.text || item.claim || item.statement || "",
+      kind: item.kind || item.claim_type || "cited claim",
+      citations: cite(item),
+    })).filter((item) => item.text);
+    const recommendations = (ragResult?.recommended_next_actions || []).map((item) => {
+      if (typeof item === "string") return { text: item, basis: "", citations: [] };
+      return {
+      text: item.text || item.action || item.recommendation || "",
+        basis: item.basis || item.reason || "",
+        citations: cite(item),
+      };
+    }).filter((item) => item.text);
+    const investigatorItems = investigatorFindings.map((item) => ({
+      text: item.finding || item.text || item.summary || "",
+      citations: cite(item),
+      source: item.source || item.source_reference || "",
+    })).filter((item) => item.text);
+    const ruleFindings = findings.map((item) => ({
+      text: `${item.rule_id || "Security rule"}: ${item.title || item.reason || "matched"}${item.reason && item.title ? ` — ${item.reason}` : ""}`,
+      severity: item.severity || "",
+      evidence_refs: Array.isArray(item.evidence_refs) ? item.evidence_refs : [],
+    }));
     let aiConclusion;
     if (acceptedRag.length || investigatorFindings.length || rejectedCount) {
       aiConclusion = `Grounded analysis returned ${acceptedRag.length} accepted/citation-validated item(s) and rejected ${rejectedCount} unsupported item(s); the investigator returned ${investigatorFindings.length} cited finding(s).`;
@@ -100,15 +152,25 @@
     const missing = [];
     for (const [stageName, result] of Object.entries(stage)) {
       if (result && result.ok === false && result.error) missing.push(`${stageName}: ${result.error}`);
+      const data = result?.ok ? result.data : null;
+      if (data?.status === "provider_unavailable") missing.push(`${stageName}: provider unavailable`);
+      for (const error of data?.errors || []) missing.push(`${stageName}: ${error.message || error.stage || "provider error"}`);
     }
     for (const result of evidence) {
       for (const limitation of result.limitations || []) missing.push(`${result.analyzer_type}: ${limitation}`);
       for (const error of result.errors || []) missing.push(`${result.analyzer_type}: ${error.message || error.stage || "analysis error"}`);
+      if (["unavailable", "failed"].includes(result.status)) missing.push(`${result.analyzer_type}: analyzer status ${result.status}`);
     }
     if (!evidence.length) missing.push("Stage 5 evidence results were unavailable.");
     for (const limitation of riskResult?.limitations || []) missing.push(`risk: ${limitation}`);
     for (const limitation of ragResult?.limitations || []) missing.push(`RAG: ${limitation}`);
     for (const limitation of investigationResult?.limitations || []) missing.push(`investigator: ${limitation}`);
+    if (ragResult && !acceptedRag.length && !["provider_unavailable", "no_evidence"].includes(ragResult.status)) {
+      missing.push("RAG returned no supported claims; the deterministic summary uses only returned evidence and findings.");
+    }
+    if (investigationResult && !investigatorFindings.length && investigationResult.status === "completed") {
+      missing.push("Investigator returned no cited findings; this is not evidence that no threat exists.");
+    }
     for (const failure of socialDiscovery?.failures || []) missing.push(`social provider ${failure.source}: ${failure.reason}`);
     if (socialDiscovery?.status === "inconclusive") missing.push("Social provider returned no matching profile; absence of a result is inconclusive.");
     if (!gateWasEvaluated) missing.push("Stage 6 gate decision was unavailable.");
@@ -156,6 +218,11 @@
         candidate: target,
         candidate_type: candidateType,
         disposition,
+        assessment: alerts.length
+          ? `${alerts.length} new or changed monitoring finding(s) need review.`
+          : "No change alert was recorded by this check. This is not proof of safety.",
+        main_findings: unique(alerts.map((item) => item.summary || item.change_type)),
+        stage_statuses: [`monitoring: ${monitoring.status || "unknown"}`],
         evidence_examined: unique(examined),
         gate: gateReason,
         rules: ruleConclusion,
@@ -164,6 +231,15 @@
         ai_analysis: monitorAi,
         missing_evidence: unique(missingEvidence),
         next_step: nextStep,
+        risk_score_value: null,
+        risk_classification: "",
+        input_quality: [],
+        evidence_coverage: [],
+        rule_findings: [],
+        cited_claims: [],
+        recommendations: [],
+        investigator_findings: [],
+        analyzer_observations: [],
       };
     }
 
@@ -171,17 +247,68 @@
       candidate: target,
       candidate_type: candidateType,
       disposition,
+      assessment: gateOutcome === "verified_official"
+        ? "The submitted identity matched a registered verified official asset."
+        : gateOutcome === "unverified"
+          ? "The identity needs analyst verification before threat classification."
+          : findings.length
+            ? `${findings.length} rule-based signal(s) were found. Review their evidence before acting.`
+            : "The available evidence is inconclusive; no finding here establishes that the candidate is safe.",
+      main_findings: unique([
+        ...findings.map((item) => `${item.rule_id || "Security rule"}: ${item.title || item.reason || "matched"}`),
+        ...observedIndicators,
+      ]).slice(0, 8),
+      stage_statuses: ["evidence", "gate", "rules", "risk", "rag", "investigate"].map((key) => {
+        const result = stage[key];
+        if (!result) return `${key}: not run`;
+        if (!result.ok) return `${key}: unavailable`;
+        const data = result.data || {};
+        const unavailable = ["unavailable", "provider_unavailable", "no_evidence", "no_model", "model_unavailable", "failed", "failed_closed"];
+        const partial = ["partial", "routed_to_verification", "excluded_verified_official"];
+        const nestedStatuses = key === "evidence" ? (data.results || []).map((item) => item.status) : [];
+        const nestedUnavailable = nestedStatuses.filter((status) => unavailable.includes(status)).length;
+        const isUnavailable = unavailable.includes(data.status) ||
+          (nestedStatuses.length > 0 && nestedUnavailable === nestedStatuses.length);
+        const isPartial = partial.includes(data.status) ||
+          nestedStatuses.some((status) => partial.includes(status)) ||
+          (nestedUnavailable > 0 && nestedUnavailable < nestedStatuses.length);
+        const status = isUnavailable ? "unavailable"
+          : isPartial || data.errors?.length || data.limitations?.length ? "partial"
+            : "completed";
+        return `${key}: ${status}`;
+      }),
       evidence_examined: unique(examined),
       gate: `${gateOutcome}: ${gateReason}`,
       rules: ruleConclusion,
       ml: mlConclusion,
       risk_score: scoreMeaning,
+      risk_score_value: typeof score === "number" ? score : null,
+      risk_classification: riskResult?.classification || riskResult?.risk_classification || riskResult?.risk_level || "",
+      input_quality: Array.isArray(riskResult?.input_quality) ? riskResult.input_quality : [],
       ai_analysis: aiConclusion,
+      rule_findings: ruleFindings,
+      analyzer_observations: unique(observedIndicators),
+      cited_claims: citedClaims,
+      recommendations,
+      investigator_findings: investigatorItems,
+      evidence_coverage: evidence.map((result) => `${result.analyzer_type}: ${result.status}`),
       missing_evidence: missingEvidence,
       next_step: nextStep,
     };
   }
 
   root.buildInvestigationSummary = buildInvestigationSummary;
-  if (typeof module !== "undefined" && module.exports) module.exports = { buildInvestigationSummary };
+  function showCompletionDialog(dialog, summaryMarkup) {
+    if (!dialog) return false;
+    const summary = dialog.querySelector("#inv-completion-summary");
+    if (!summary) return false;
+    summary.innerHTML = summaryMarkup;
+    if (!dialog.open && typeof dialog.showModal === "function") dialog.showModal();
+    return true;
+  }
+  root.showInvestigationCompletionDialog = showCompletionDialog;
+  if (typeof module !== "undefined" && module.exports) module.exports = {
+    buildInvestigationSummary,
+    showInvestigationCompletionDialog: showCompletionDialog,
+  };
 })(typeof globalThis !== "undefined" ? globalThis : this);

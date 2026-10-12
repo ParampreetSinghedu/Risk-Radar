@@ -118,7 +118,7 @@ def seed_demo_data(db: Session) -> DemoSeedSummary:
     sub_defs = [
         {
             "type": SubmissionType.URL,
-            "source": "discovery:urlhaus",
+            "source": "demo:synthetic",
             "content": "https://paypa1-security-update.com/login",
             "brand": "PayPal",
         },
@@ -130,7 +130,7 @@ def seed_demo_data(db: Session) -> DemoSeedSummary:
         },
         {
             "type": SubmissionType.URL,
-            "source": "discovery:openphish",
+            "source": "demo:synthetic",
             "content": "https://microsoft-login-verify-account.com",
             "brand": "Microsoft",
         },
@@ -173,33 +173,37 @@ def seed_demo_data(db: Session) -> DemoSeedSummary:
     # 3. Seed Cases with realistic triage states
     case_defs = [
         {
-            "title": "PayPal Credential Harvester on Typosquat Domain",
+            "title": "Possible PayPal-Style Impersonation — Synthetic Typosquat URL",
             "target": "https://paypa1-security-update.com/login",
             "gate_outcome": "not_matched",
             "alert_eligible": True,
             "status": CaseStatus.IN_REVIEW,
             "notes": [
-                "Automated discovery hit via URLhaus feed.",
-                "Typosquatting detected: 'paypa1' target mimicking 'paypal.com'.",
+                "Synthetic demo candidate; no live URLhaus result or incident is represented.",
+                "The sample hostname substitutes '1' for 'l' in a "
+                "PayPal-style name; this is a triage "
+                "cue, not proof of impersonation or malicious activity.",
             ],
             "review": {
-                "verdict": ReviewVerdict.MALICIOUS,
+                "verdict": ReviewVerdict.SUSPICIOUS,
                 "reason": (
-                    "Confirmed credential harvester mimicking official PayPal login with "
-                    "homoglyph '1'."
+                    "Synthetic exercise: the hostname uses a character substitution in a "
+                    "PayPal-style "
+                    "name; no live page or credential theft was verified."
                 ),
                 "analyst": "security_analyst_1",
-                "label": 1,
+                "label": 0,
             },
         },
         {
-            "title": "Acme Bank Fake Account Verification Portal",
+            "title": "Synthetic Acme Bank-Style Phishing URL Candidate",
             "target": "https://acme-bank-update-alert.net/login",
             "gate_outcome": "not_matched",
             "alert_eligible": True,
             "status": CaseStatus.OPEN,
             "notes": [
-                "User-submitted suspicious SMS link targeting Acme Bank customers.",
+                "Synthetic demo URL candidate only; no live page, victim, or incident is "
+                "represented.",
             ],
             "review": None,
         },
@@ -219,6 +223,59 @@ def seed_demo_data(db: Session) -> DemoSeedSummary:
                 "analyst": "security_analyst_1",
                 "label": 0,
             },
+        },
+        {
+            "title": "Possible PayPal-Style Social Profile Impersonation (Synthetic)",
+            "target": "@paypa1_support",
+            "gate_outcome": "not_matched",
+            "alert_eligible": True,
+            "status": CaseStatus.OPEN,
+            "notes": [
+                "Synthetic handle for triage demonstration; no platform lookup or account "
+                "ownership was verified.",
+                "Character substitution is a review cue only and does not establish impersonation.",
+            ],
+            "review": None,
+        },
+        {
+            "title": "Suspicious-Looking Phishing URL Sample (Reserved Domain)",
+            "target": "https://microsoft-login-verify-account.example/",
+            "gate_outcome": "not_matched",
+            "alert_eligible": True,
+            "status": CaseStatus.OPEN,
+            "notes": [
+                "Synthetic URL string on the reserved .example domain; no network request or "
+                "threat-feed match is represented.",
+                "The brand-like wording is a triage cue, not a confirmed phishing finding.",
+            ],
+            "review": None,
+        },
+        {
+            "title": "Suspicious-Looking PayPal-Style Mobile App Candidate (Synthetic)",
+            "target": "com.example.paypal.assistant",
+            "gate_outcome": "unverified",
+            "alert_eligible": False,
+            "status": CaseStatus.OPEN,
+            "notes": [
+                "Synthetic package identifier only; no app-store listing or publisher metadata "
+                "was retrieved.",
+                "The package name alone cannot establish that an application exists or is "
+                "malicious.",
+            ],
+            "review": None,
+        },
+        {
+            "title": "Synthetic Account-Alert Message / Screenshot Triage",
+            "target": "https://messages.example/account-alert",
+            "gate_outcome": "unverified",
+            "alert_eligible": False,
+            "status": CaseStatus.OPEN,
+            "notes": [
+                "Synthetic message/screenshot scenario; this case contains no uploaded image or "
+                "extracted text.",
+                "No sender, link destination, or incident has been verified.",
+            ],
+            "review": None,
         },
     ]
 
@@ -288,6 +345,106 @@ def seed_demo_data(db: Session) -> DemoSeedSummary:
                         actor=r_def["analyst"],
                     )
                 )
+        elif c_def["target"] == "https://paypa1-security-update.com/login":
+            # Correct only the exact synthetic record emitted by the earlier
+            # demo seeder. Preserve its append-only timeline and any real reviews.
+            try:
+                existing_snapshot = json.loads(existing_case.snapshot or "{}")
+            except json.JSONDecodeError:
+                existing_snapshot = {}
+            if not isinstance(existing_snapshot, dict):
+                existing_snapshot = {}
+            provenance = existing_snapshot.get("provenance", {})
+            if not isinstance(provenance, dict):
+                provenance = {}
+            if (
+                provenance.get("dataset") == SYNTHETIC_PROVENANCE["dataset"]
+                and existing_case.title == "PayPal Credential Harvester on Typosquat Domain"
+            ):
+                existing_case.title = c_def["title"]
+                old_reason = (
+                    "Confirmed credential harvester mimicking official PayPal login with "
+                    "homoglyph '1'."
+                )
+                legacy_review = db.scalar(
+                    select(HumanReview).where(
+                        HumanReview.case_id == existing_case.id,
+                        HumanReview.reason == old_reason,
+                        HumanReview.verdict == ReviewVerdict.MALICIOUS,
+                    )
+                )
+                if legacy_review is not None:
+                    try:
+                        review_tags = json.loads(legacy_review.tags or "[]")
+                    except json.JSONDecodeError:
+                        review_tags = []
+                    if (
+                        isinstance(review_tags, list)
+                        and "demo" in review_tags
+                        and "synthetic" in review_tags
+                    ):
+                        legacy_review.verdict = c_def["review"]["verdict"]
+                        legacy_review.reason = c_def["review"]["reason"]
+                        legacy_review.label = c_def["review"]["label"]
+                correction_note = (
+                    "Demo-data correction: earlier seeded wording claimed a confirmed "
+                    "credential harvester without evidence. This is a synthetic triage "
+                    "example; no live page or credential theft was verified."
+                )
+                existing_note = db.scalar(
+                    select(CaseEvent).where(
+                        CaseEvent.case_id == existing_case.id,
+                        CaseEvent.event_type == "note",
+                        CaseEvent.note == correction_note,
+                    )
+                )
+                if existing_note is None:
+                    db.add(
+                        CaseEvent(
+                            case_id=existing_case.id,
+                            event_type="note",
+                            note=correction_note,
+                            actor="system",
+                        )
+                    )
+        elif c_def["target"] == "https://acme-bank-update-alert.net/login":
+            # The previous synthetic title asserted the portal was fake without
+            # retrieved evidence. Correct only that exact tagged demo case.
+            try:
+                existing_snapshot = json.loads(existing_case.snapshot or "{}")
+            except json.JSONDecodeError:
+                existing_snapshot = {}
+            if not isinstance(existing_snapshot, dict):
+                existing_snapshot = {}
+            provenance = existing_snapshot.get("provenance", {})
+            if not isinstance(provenance, dict):
+                provenance = {}
+            if (
+                provenance.get("dataset") == SYNTHETIC_PROVENANCE["dataset"]
+                and existing_case.title == "Acme Bank Fake Account Verification Portal"
+            ):
+                existing_case.title = c_def["title"]
+                correction_note = (
+                    "Demo-data correction: the earlier seeded title called this a fake portal "
+                    "without verification. This is a synthetic URL candidate; no live page or "
+                    "incident was verified."
+                )
+                existing_note = db.scalar(
+                    select(CaseEvent).where(
+                        CaseEvent.case_id == existing_case.id,
+                        CaseEvent.event_type == "note",
+                        CaseEvent.note == correction_note,
+                    )
+                )
+                if existing_note is None:
+                    db.add(
+                        CaseEvent(
+                            case_id=existing_case.id,
+                            event_type="note",
+                            note=correction_note,
+                            actor="system",
+                        )
+                    )
 
     db.commit()
     summary.details = {

@@ -42,5 +42,8 @@ def analyze_evidence(
     vision = get_vision_provider(settings)
     dns, rdap, redirects = get_resolvers(settings)
     url_analyzer = UrlDomainAnalyzer(dns=dns, rdap=rdap, redirects=redirects)
-    image_analyzer = ImageAnalyzer(ocr=get_tesseract_ocr(), vision=vision)
+    image_analyzer = ImageAnalyzer(
+        ocr=get_tesseract_ocr(settings.tesseract_cmd),
+        vision=vision,
+    )
     return EvidenceEngine(url=url_analyzer, image=image_analyzer).analyze(db, payload)

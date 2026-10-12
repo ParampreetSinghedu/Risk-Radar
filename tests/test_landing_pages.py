@@ -36,11 +36,42 @@ def test_existing_dashboard_aliases_and_api_remain_available(client: TestClient)
     assert 'id="view-cases"' in app_page.text
     assert 'id="view-alerts"' in app_page.text
     assert 'id="inv-image"' in app_page.text
+    assert 'id="inv-image-preview-img"' in app_page.text
+    assert 'id="inv-image-remove"' in app_page.text
+    assert 'id="inv-image-error"' in app_page.text
+    assert 'id="inv-summary-inline"' in app_page.text
+    assert 'id="inv-completion-dialog"' in app_page.text
+    assert 'id="inv-completion-summary"' in app_page.text
+    assert 'data-dashboard-view="investigate"' in app_page.text
+    assert 'id="dash-monitoring"' in app_page.text
     assert 'href="/project"' in app_page.text
     assert "max-width: 820px" in app_page.text
     assert "max-width: 560px" in app_page.text
     assert client.get("/api/v1/health").status_code == 200
+    assert client.get("/api/v1/dashboard").status_code == 200
+    assert client.get("/api/v1/monitoring/targets").status_code == 200
+    assert client.get("/api/v1/monitoring/alerts?acknowledged=false").status_code == 200
+    assert client.get("/api/v1/monitoring/status").status_code == 200
     assert client.get("/app.js").status_code == 200
+    script = client.get("/app.js").text
+    assert 'api("/evidence/analyze"' in script
+    assert 'api("/submissions"' in script
+    assert "Running investigation…" in script
+    assert 'api("/monitoring/targets")' in script
+    assert 'api("/monitoring/alerts?acknowledged=false")' in script
+    assert 'api("/monitoring/status")' in script
+    assert 'data-dashboard-view' in script
+    assert "At a glance —" in script
+    assert "Rule findings" in script
+    assert "Analyzer observations" in script
+    assert "Provider status and evidence gaps" in script
+    assert (
+        'showInvestigationCompletionDialog($("#inv-completion-dialog"), finalSummaryMarkup)'
+        in script
+    )
+    assert 'summaryOut.innerHTML = summaryMarkup' in script
+    assert 'setAttribute("aria-busy", "true")' in script
+    assert "createImageBitmap(file)" in script
     assert client.get("/site.css").status_code == 200
 
 

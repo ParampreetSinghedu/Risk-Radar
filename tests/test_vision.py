@@ -7,6 +7,8 @@ extraction, provider failures, source provenance and Stage 6 gate enforcement.
 
 from __future__ import annotations
 
+import base64
+import os
 import shutil
 import struct
 import zlib
@@ -20,6 +22,7 @@ from risk_radar.evidence.image_text import ImageAnalyzer
 from risk_radar.evidence.vision import (
     MAX_IMAGE_BYTES,
     ClaudeVisionProvider,
+    GroqVisionProvider,
     VisionError,
     detect_media_type,
     get_tesseract_ocr,
@@ -151,11 +154,61 @@ def test_validate_image_accepts_valid_png():
     assert problems == []
 
 
+def test_tesseract_configured_absolute_path_is_used(monkeypatch, tmp_path):
+    executable = tmp_path / "tesseract.exe"
+    executable.write_bytes(b"test executable placeholder")
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+    backend = get_tesseract_ocr(str(executable))
+    assert backend is not None
+    assert backend.executable_path == str(executable)
+
+    import pytesseract
+
+    monkeypatch.setattr(pytesseract, "image_to_string", lambda _image, timeout: "sample OCR")
+    assert backend.extract_text(PNG) == "sample OCR"
+    assert pytesseract.pytesseract.tesseract_cmd == str(executable)
+
+
+def test_invalid_configured_tesseract_path_is_unavailable(tmp_path):
+    assert get_tesseract_ocr(str(tmp_path / "missing-tesseract.exe")) is None
+
+
+def test_tesseract_path_lookup_is_preserved_when_unset(monkeypatch):
+    def find_executable(name):
+        return "tesseract-on-path" if name == "tesseract" else None
+
+    monkeypatch.setattr(shutil, "which", find_executable)
+    backend = get_tesseract_ocr()
+    assert backend is not None
+    assert backend.executable_path == "tesseract-on-path"
+
+
+def test_tesseract_cmd_is_an_optional_settings_value():
+    from risk_radar.core.config import Settings
+
+    executable = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+    settings = Settings(_env_file=None, tesseract_cmd=executable)
+    assert settings.tesseract_cmd == executable
+
+
+def test_missing_pillow_is_reported_as_decoder_dependency(monkeypatch):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "PIL", None)
+    media_type, problems = validate_image(PNG)
+    assert media_type == "image/png"
+    assert any("Pillow is a required runtime dependency" in problem for problem in problems)
+
+
 # --- analyzer behaviour ----------------------------------------------------
 
 
-def test_vision_output_is_distinct_and_unverified_not_mislabeled_as_ocr():
-    pytest.importorskip("PIL.Image")
+def test_vision_output_is_distinct_and_unverified_not_mislabeled_as_ocr(monkeypatch):
+    # OCR is optional: a configured vision provider must still run when the
+    # local Tesseract backend is absent. Image decoding itself is mocked here.
+    from risk_radar.evidence import image_text
+
+    monkeypatch.setattr(image_text, "validate_image", lambda _image: ("image/png", []))
     result = ImageAnalyzer(vision=FakeVision()).analyze(PNG)
     assert isinstance(result, AnalyzerResult)
     assert result.status == "partial"  # local OCR is not configured in this test
@@ -163,6 +216,37 @@ def test_vision_output_is_distinct_and_unverified_not_mislabeled_as_ocr():
     assert vision and "verify your account" in vision[0]["value"]
     assert vision[0]["unverified"] is True
     assert not any(o["kind"] == "ocr_text" for o in result.observations)
+
+
+def test_missing_ocr_backend_does_not_block_configured_vision(monkeypatch):
+    monkeypatch.setattr(image_text, "validate_image", lambda _image: ("image/png", []))
+    result = ImageAnalyzer(ocr=None, vision=FakeVision("Visible screenshot text")).analyze(PNG)
+    statuses = {
+        item["value"]["provider"]: item["value"]["status"]
+        for item in result.observations
+        if item["kind"] == "provider_status"
+    }
+    assert statuses == {"local_ocr": "unavailable", "vision": "completed"}
+    assert any(item["kind"] == "vision_model_observation" for item in result.observations)
+    assert not any(item["kind"] == "ocr_text" for item in result.observations)
+
+
+def test_ocr_failure_is_reported_without_blocking_vision(monkeypatch):
+    monkeypatch.setattr(image_text, "validate_image", lambda _image: ("image/png", []))
+
+    class FailedOcr:
+        name = "failed_ocr"
+
+        def extract_text(self, image: bytes) -> str:
+            raise RuntimeError("OCR unavailable")
+
+    result = ImageAnalyzer(
+        ocr=FailedOcr(), vision=FakeVision("Visible model observation")
+    ).analyze(PNG)
+    assert result.status == "partial"
+    assert any(error["stage"] == "ocr" for error in result.errors)
+    assert any(item["kind"] == "vision_model_observation" for item in result.observations)
+    assert not any(item["kind"] == "ocr_text" for item in result.observations)
 
 
 def test_ocr_text_is_normalized_into_url_and_handle_observations():
@@ -194,7 +278,9 @@ def test_empty_ocr_is_explicitly_inconclusive():
 
 def test_real_tesseract_ocr_on_generated_image_when_installed():
     pytest.importorskip("PIL.Image")
-    if get_tesseract_ocr() is None or shutil.which("tesseract") is None:
+    configured_path = os.environ.get("TESSERACT_CMD")
+    ocr = get_tesseract_ocr(configured_path)
+    if ocr is None:
         pytest.skip("Pillow, pytesseract and the Tesseract executable are not all installed")
     from PIL import Image, ImageDraw, ImageFont
 
@@ -203,9 +289,29 @@ def test_real_tesseract_ocr_on_generated_image_when_installed():
     draw.text((30, 60), "VERIFY ACCOUNT", fill="black", font=ImageFont.load_default(size=64))
     buffer = BytesIO()
     image.save(buffer, format="PNG")
-    result = ImageAnalyzer(ocr=get_tesseract_ocr()).analyze(buffer.getvalue())
+    result = ImageAnalyzer(ocr=ocr).analyze(buffer.getvalue())
     extracted = next(item["value"] for item in result.observations if item["kind"] == "ocr_text")
     assert "VERIFY" in extracted.upper()
+
+
+def test_tesseract_runtime_failure_is_reported_without_fabricating_text(
+    monkeypatch, tmp_path
+):
+    executable = tmp_path / "tesseract.exe"
+    executable.write_bytes(b"test executable placeholder")
+    backend = get_tesseract_ocr(str(executable))
+    assert backend is not None
+
+    import pytesseract
+
+    def fail_ocr(_image, timeout):
+        raise RuntimeError("synthetic OCR failure")
+
+    monkeypatch.setattr(pytesseract, "image_to_string", fail_ocr)
+    result = ImageAnalyzer(ocr=backend).analyze(PNG)
+    assert not any(item["kind"] == "ocr_text" for item in result.observations)
+    assert any(error["stage"] == "ocr" for error in result.errors)
+    assert any("no text was fabricated" in item for item in result.limitations)
 
 
 def test_missing_provider_reports_unavailable_not_safe():
@@ -313,8 +419,10 @@ def test_media_type_observation_present():
 def test_get_vision_provider_none_without_key():
     class Settings:
         anthropic_api_key = None
+        groq_api_key = None
         llm_model = "claude-x"
         vision_model = "claude-haiku-4-5-20251001"
+        groq_vision_model = "qwen/qwen3.8-27b"
 
     assert get_vision_provider(Settings()) is None
 
@@ -326,11 +434,52 @@ def test_get_vision_provider_builds_with_key():
         anthropic_api_key = SecretStr("sk-test")
         llm_model = "claude-3-5-haiku-latest"
         vision_model = "claude-haiku-4-5-20251001"
+        groq_api_key = None
+        groq_vision_model = "qwen/qwen3.8-27b"
 
     provider = get_vision_provider(Settings())
     assert isinstance(provider, ClaudeVisionProvider)
     assert provider.name == "claude_vision"
     assert provider._model == "claude-haiku-4-5-20251001"
+
+
+def test_get_vision_provider_uses_groq_when_anthropic_key_is_absent():
+    from pydantic import SecretStr
+
+    class Settings:
+        anthropic_api_key = None
+        groq_api_key = SecretStr("groq-test-key")
+        groq_vision_model = "qwen/qwen3.8-27b"
+
+    provider = get_vision_provider(Settings())
+    assert isinstance(provider, GroqVisionProvider)
+    assert provider.name == "groq_vision"
+    assert provider._model == "qwen/qwen3.8-27b"
+    assert provider._api_key == "groq-test-key"
+
+
+def test_get_vision_provider_preserves_claude_priority_when_both_keys_exist():
+    from pydantic import SecretStr
+
+    class Settings:
+        anthropic_api_key = SecretStr("anthropic-test-key")
+        vision_model = "claude-test-model"
+        groq_api_key = SecretStr("groq-test-key")
+        groq_vision_model = "qwen/qwen3.8-27b"
+
+    provider = get_vision_provider(Settings())
+    assert isinstance(provider, ClaudeVisionProvider)
+    assert provider._model == "claude-test-model"
+
+
+def test_groq_vision_model_setting_is_separate_from_text_model(monkeypatch):
+    from risk_radar.core.config import Settings
+
+    monkeypatch.setenv("GROQ_MODEL", "existing-text-model")
+    monkeypatch.setenv("GROQ_VISION_MODEL", "qwen/qwen3.8-27b")
+    settings = Settings(_env_file=None)
+    assert settings.groq_model == "existing-text-model"
+    assert settings.groq_vision_model == "qwen/qwen3.8-27b"
 
 
 def test_claude_vision_uses_injected_http_client():
@@ -347,8 +496,8 @@ def test_claude_vision_uses_injected_http_client():
         def __init__(self):
             self.last = None
 
-        def post(self, url, json=None, headers=None):
-            self.last = {"url": url, "json": json, "headers": headers}
+        def post(self, url, json=None, headers=None, timeout=None):
+            self.last = {"url": url, "json": json, "headers": headers, "timeout": timeout}
             return FakeResponse()
 
     http = FakeHttp()
@@ -362,6 +511,155 @@ def test_claude_vision_uses_injected_http_client():
     prompt = http.last["json"]["messages"][0]["content"][1]["text"]
     assert "Do not claim" in prompt and "not OCR" in prompt
     assert http.last["headers"]["x-api-key"] == "sk-test"
+    assert http.last["timeout"] == 30.0
+
+
+@pytest.mark.parametrize("body", [[], {}, {"content": "malformed"}, {"content": [None]}])
+def test_claude_vision_rejects_malformed_response_without_inventing_text(body):
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return body
+
+    class FakeHttp:
+        def post(self, url, json=None, headers=None, timeout=None):
+            return FakeResponse()
+
+    provider = ClaudeVisionProvider(
+        api_key="test-key",
+        model="claude-haiku-4-5-20251001",
+        client=FakeHttp(),
+    )
+    with pytest.raises(VisionError, match="valid content collection|empty response"):
+        provider.extract_text(PNG, "image/png")
+
+
+def test_groq_vision_uses_documented_base64_data_url_and_parses_response():
+    """Groq Chat Completions accepts image_url data URLs for local image bytes."""
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": "Visible button reads Verify"}}]}
+
+    class FakeHttp:
+        def __init__(self):
+            self.last = None
+
+        def post(self, url, json=None, headers=None, timeout=None):
+            self.last = {"url": url, "json": json, "headers": headers, "timeout": timeout}
+            return FakeResponse()
+
+    http = FakeHttp()
+    provider = GroqVisionProvider(
+        api_key="groq-test-key",
+        model="qwen/qwen3.8-27b",
+        client=http,
+        timeout=17.0,
+    )
+    assert provider.extract_text(PNG, "image/png") == "Visible button reads Verify"
+    request = http.last
+    assert request["url"] == "https://api.groq.com/openai/v1/chat/completions"
+    assert request["headers"]["authorization"] == "Bearer groq-test-key"
+    assert request["timeout"] == 17.0
+    payload = request["json"]
+    assert payload["model"] == "qwen/qwen3.8-27b"
+    content = payload["messages"][0]["content"]
+    assert content[0]["type"] == "text"
+    assert "not OCR" in content[0]["text"]
+    assert content[1] == {
+        "type": "image_url",
+        "image_url": {
+            "url": "data:image/png;base64," + base64.b64encode(PNG).decode("ascii")
+        },
+    }
+    assert "image/png" not in request["headers"].values()
+
+
+def test_groq_vision_timeout_is_reported_without_image_content():
+    import httpx
+
+    class FakeHttp:
+        def post(self, url, json=None, headers=None, timeout=None):
+            raise httpx.TimeoutException("request timed out")
+
+    provider = GroqVisionProvider("groq-test-key", "qwen/qwen3.8-27b", client=FakeHttp())
+    with pytest.raises(VisionError, match="Groq vision request timed out"):
+        provider.extract_text(PNG, "image/png")
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 429, 500])
+def test_groq_vision_http_errors_are_sanitized(status):
+    import httpx
+
+    class FakeResponse:
+        status_code = status
+
+        def raise_for_status(self):
+            request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
+            response = httpx.Response(status, request=request)
+            raise httpx.HTTPStatusError(
+                "provider error details", request=request, response=response
+            )
+
+    class FakeHttp:
+        def post(self, url, json=None, headers=None, timeout=None):
+            return FakeResponse()
+
+    provider = GroqVisionProvider("groq-test-key", "qwen/qwen3.8-27b", client=FakeHttp())
+    with pytest.raises(VisionError) as exc:
+        provider.extract_text(PNG, "image/png")
+    assert "provider error details" not in str(exc.value)
+    assert f"status {status}" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        [],
+        {},
+        {"choices": "malformed"},
+        {"choices": [{}]},
+        {"choices": [{"message": {"content": []}}]},
+        {"choices": [{"message": {"content": "   "}}]},
+    ],
+)
+def test_groq_vision_rejects_malformed_or_empty_responses(body):
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return body
+
+    class FakeHttp:
+        def post(self, url, json=None, headers=None, timeout=None):
+            return FakeResponse()
+
+    provider = GroqVisionProvider("groq-test-key", "qwen/qwen3.8-27b", client=FakeHttp())
+    with pytest.raises(VisionError):
+        provider.extract_text(PNG, "image/png")
+
+
+def test_groq_vision_response_json_decode_error_is_reported():
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            raise ValueError("invalid JSON")
+
+    class FakeHttp:
+        def post(self, url, json=None, headers=None, timeout=None):
+            return FakeResponse()
+
+    provider = GroqVisionProvider("groq-test-key", "qwen/qwen3.8-27b", client=FakeHttp())
+    with pytest.raises(VisionError, match="not valid JSON"):
+        provider.extract_text(PNG, "image/png")
 
 
 # --- Stage 6 gate enforcement ----------------------------------------------

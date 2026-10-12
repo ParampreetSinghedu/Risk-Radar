@@ -142,6 +142,37 @@ def test_only_selected_search_provider_is_registered(monkeypatch):
     assert isinstance(configured_search_connector(settings), TavilySearchConnector)
 
 
+@pytest.mark.parametrize(
+    ("provider", "connector_type"),
+    [
+        ("brave", BraveSearchConnector),
+        ("tavily", TavilySearchConnector),
+        ("exa", ExaSearchConnector),
+    ],
+)
+def test_each_search_provider_can_be_selected_without_making_brave_mandatory(
+    provider, connector_type
+):
+    settings = Settings(_env_file=None, search_provider=provider)
+    assert isinstance(configured_search_connector(settings), connector_type)
+
+
+@pytest.mark.parametrize("connector_type", [TavilySearchConnector, ExaSearchConnector])
+def test_search_adapter_returns_empty_results_without_error(connector_type):
+    with _client(lambda _request: httpx.Response(200, json={"results": []})) as client:
+        assert connector_type("test-key", client=client).search("acme") == []
+
+
+@pytest.mark.parametrize("connector_type", [TavilySearchConnector, ExaSearchConnector])
+def test_search_adapter_reports_timeout(connector_type):
+    def timeout(request):
+        raise httpx.ReadTimeout("offline", request=request)
+
+    with _client(timeout) as client:
+        with pytest.raises(ConnectorError, match="timed out"):
+            connector_type("test-key", client=client).search("acme")
+
+
 def test_provider_configuration_reports_boolean_presence_without_secret_values(
     client, monkeypatch
 ):

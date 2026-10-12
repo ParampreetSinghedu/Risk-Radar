@@ -52,12 +52,21 @@ class AppleStoreLookup:
                     follow_redirects=False,
                 )
             else:
-                response = self.client.get(_APPLE_LOOKUP, params={"id": identifier})
+                response = self.client.get(
+                    _APPLE_LOOKUP,
+                    params={"id": identifier},
+                    timeout=self.timeout,
+                    follow_redirects=False,
+                )
             response.raise_for_status()
             payload = response.json()
         except (httpx.HTTPError, ValueError):
             return None, "Apple lookup source was unavailable or returned invalid data"
-        if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+        if (
+            not isinstance(payload, dict)
+            or not isinstance(payload.get("results"), list)
+            or not isinstance(payload.get("resultCount"), int)
+        ):
             return None, "Apple lookup response did not contain a valid results collection"
         for item in payload["results"]:
             if isinstance(item, dict) and str(item.get("trackId")) == identifier:
@@ -272,9 +281,11 @@ class ApplicationListingAnalyzer:
                 if identifier and _PACKAGE_RE.fullmatch(identifier):
                     return "google_play", identifier, value
             if host in {"apps.apple.com", "itunes.apple.com"}:
-                match = re.search(r"/id(\d+)(?:/|$)", parts.path)
+                match = re.search(r"/id([^/]+)(?:/|$)", parts.path)
                 if match:
-                    return "apple_app_store", match.group(1), value
+                    identifier = match.group(1)
+                    if identifier.isdecimal():
+                        return "apple_app_store", identifier, value
             return None
         if _PACKAGE_RE.fullmatch(value):
             return "android_package", value, None

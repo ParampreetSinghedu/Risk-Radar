@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+
 from risk_radar.api.v1 import evidence as evidence_api
 from risk_radar.api.v1 import investigate as investigator_api
 from risk_radar.api.v1 import monitoring as monitoring_api
@@ -10,6 +12,45 @@ from risk_radar.evidence import image_text
 from risk_radar.evidence.resolvers import UnavailableDns, UnavailableRdap, UnavailableRedirect
 from risk_radar.investigator.service import InvestigatorService
 from risk_radar.monitoring.service import MonitorCheckResult, MonitoringService, MonitorSignal
+
+
+def test_uploaded_image_uses_configured_groq_vision_in_evidence_pipeline(monkeypatch):
+    """The API returns Groq-attributed image observations without a live call."""
+
+    class FixtureVision:
+        name = "groq_vision"
+
+        def extract_text(self, image, media_type):
+            assert image == b"mocked uploaded image"
+            assert media_type == "image/png"
+            return "Visible screenshot text: verify account"
+
+    monkeypatch.setattr(image_text, "validate_image", lambda _image: ("image/png", []))
+    monkeypatch.setattr(evidence_api, "get_vision_provider", lambda _settings: FixtureVision())
+    monkeypatch.setattr(evidence_api, "get_tesseract_ocr", lambda _path=None: None)
+
+    from risk_radar.evidence.service import EvidenceRequest
+
+    result = evidence_api.analyze_evidence(
+        EvidenceRequest(
+            target="https://example.com",
+            kind="domain",
+            image_b64=base64.b64encode(b"mocked uploaded image").decode("ascii"),
+            analyzers=["image"],
+        ),
+        db=None,
+    )
+    image_result = next(item for item in result.results if item.analyzer_type == "image")
+    image_dump = image_result.model_dump()
+    observation = next(
+        item
+        for item in image_dump["observations"]
+        if item["kind"] == "vision_model_observation"
+    )
+    assert observation["method"] == "vision:groq_vision"
+    assert observation["unverified"] is True
+    assert observation["value"] == "Visible screenshot text: verify account"
+    assert not any(item["kind"] == "ocr_text" for item in image_dump["observations"])
 
 
 def test_investigation_results_flow_into_analysis_and_persist_as_case_snapshot(client, monkeypatch):
@@ -120,7 +161,7 @@ def test_image_observations_reach_rules_rag_and_case_snapshot(client, monkeypatc
             return "Urgent verify at https://acme-login.example and contact @acme_help"
 
     monkeypatch.setattr(image_text, "validate_image", lambda _image: ("image/png", []))
-    monkeypatch.setattr(evidence_api, "get_tesseract_ocr", FixtureOcr)
+    monkeypatch.setattr(evidence_api, "get_tesseract_ocr", lambda _path=None: FixtureOcr())
     monkeypatch.setattr(rag_api, "get_provider", lambda _settings: None)
 
     target = "https://acme-login.example"
@@ -214,6 +255,23 @@ def test_image_observations_reach_rules_rag_and_case_snapshot(client, monkeypatc
     retrieved = client.get(f"/api/v1/cases/{case.json()['id']}/report")
     assert retrieved.status_code == 200
     assert retrieved.json()["snapshot"] == snapshot
+
+
+def test_invalid_image_does_not_abort_url_evidence_analysis(client):
+    response = client.post(
+        "/api/v1/evidence/analyze",
+        json={
+            "target": "https://example.invalid/login",
+            "kind": "domain",
+            "image_b64": "aW52YWxpZA==",
+            "analyzers": ["url", "image"],
+        },
+    )
+    assert response.status_code == 200
+    results = {item["analyzer_type"]: item for item in response.json()["results"]}
+    assert results["url"]["status"] in {"partial", "completed"}
+    assert results["image"]["status"] == "failed"
+    assert any(error["stage"] == "validate" for error in results["image"]["errors"])
 
 
 def test_app_listing_metadata_and_identity_findings_flow_to_case_snapshot(client):

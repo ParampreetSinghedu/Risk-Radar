@@ -42,7 +42,7 @@ class URLhausConnector(DiscoveryConnector):
 
     def search(self, query: str) -> list[Candidate]:
         """Query the URLhaus host endpoint and normalize the listed URLs."""
-        if not self._auth_key:
+        if not self._auth_key or not self._auth_key.strip():
             raise ConnectorUnavailableError("urlhaus: URLHAUS_AUTH_KEY is not configured")
         host = self._extract_host(query)
         try:
@@ -62,9 +62,22 @@ class URLhausConnector(DiscoveryConnector):
             response.raise_for_status()
             payload = response.json()
         except httpx.HTTPError as exc:
+            if isinstance(exc, httpx.HTTPStatusError):
+                status_code = exc.response.status_code
+                reason = (
+                    "authentication failed"
+                    if status_code in {401, 403}
+                    else "rate limited"
+                    if status_code == 429
+                    else f"provider returned HTTP {status_code}"
+                )
+                raise ConnectorError(f"urlhaus: {reason}") from exc
             raise ConnectorError(f"urlhaus: request failed ({exc.__class__.__name__})") from exc
         except ValueError as exc:
             raise ConnectorError("urlhaus: response was not valid JSON") from exc
+
+        if not isinstance(payload, dict):
+            raise ConnectorError("urlhaus: response was not a JSON object")
 
         status = payload.get("query_status")
         if status == "no_results":
@@ -76,11 +89,17 @@ class URLhausConnector(DiscoveryConnector):
         if status != "ok":
             raise ConnectorError(f"urlhaus: unexpected query_status {status!r}")
 
+        entries = payload.get("urls")
+        if not isinstance(entries, list):
+            raise ConnectorError("urlhaus: response urls are malformed")
+
         candidates = []
-        for entry in payload.get("urls") or []:
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ConnectorError("urlhaus: response urls are malformed")
             url = entry.get("url")
-            if not url:
-                continue
+            if not isinstance(url, str) or not url:
+                raise ConnectorError("urlhaus: response urls are malformed")
             metadata = {
                 key: entry[key]
                 for key in ("threat", "url_status", "tags", "date_added", "id")

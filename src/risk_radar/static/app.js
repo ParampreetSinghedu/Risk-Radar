@@ -189,6 +189,13 @@ document.querySelectorAll("#nav button").forEach((btn) => {
     if (btn.dataset.view === "evaluation") loadEvaluation();
   });
 });
+document.querySelectorAll("[data-dashboard-view]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const destination = Array.from(document.querySelectorAll("#nav button"))
+      .find((item) => item.dataset.view === button.dataset.dashboardView);
+    destination?.click();
+  });
+});
 
 const requestedView = new URLSearchParams(window.location.search).get("view");
 const requestedViewButton = Array.from(document.querySelectorAll("#nav button"))
@@ -197,7 +204,9 @@ const requestedViewButton = Array.from(document.querySelectorAll("#nav button"))
 /* ---------- dashboard ---------- */
 async function loadDashboard() {
   const cards = $("#dash-cards"), recent = $("#dash-recent");
-  cards.innerHTML = ""; recent.innerHTML = "<div class='state'>Loading…</div>";
+  const monitoring = $("#dash-monitoring");
+  cards.innerHTML = "";
+  recent.innerHTML = monitoring.innerHTML = "<div class='state'>Loading…</div>";
   try {
     const d = await api("/dashboard");
     const defs = [
@@ -213,9 +222,29 @@ async function loadDashboard() {
     if (!d.recent_cases.length) {
       recent.innerHTML = "<div class='state'>No cases yet. Open one from the Cases tab.</div>";
     } else {
-      recent.innerHTML = caseTable(d.recent_cases, false);
+      recent.innerHTML = caseTable(d.recent_cases, true, true);
       bindRowClicks(recent);
     }
+    const [targetsResult, alertsResult, runtimeResult] = await Promise.allSettled([
+      api("/monitoring/targets"), api("/monitoring/alerts?acknowledged=false"), api("/monitoring/status"),
+    ]);
+    const statusRows = [];
+    if (targetsResult.status === "fulfilled") {
+      const targets = targetsResult.value;
+      const successful = targets.filter((target) => target.active_monitoring).length;
+      statusRows.push(`<div class="dashboard-status-row"><b>Monitoring targets:</b> ${targets.length} configured; ${successful} with a successful check.</div>`);
+    } else statusRows.push(`<div class="dashboard-status-row"><b>Monitoring targets:</b> unavailable (${esc(targetsResult.reason.message)}).</div>`);
+    if (alertsResult.status === "fulfilled") {
+      statusRows.push(`<div class="dashboard-status-row"><b>Unacknowledged alerts:</b> ${alertsResult.value.length}.</div>`);
+    } else statusRows.push(`<div class="dashboard-status-row"><b>Alerts:</b> unavailable (${esc(alertsResult.reason.message)}).</div>`);
+    if (runtimeResult.status === "fulfilled") {
+      const runtime = runtimeResult.value;
+      const providerList = Object.entries(runtime.providers || {}).map(([name, state]) =>
+        `<li><b>${esc(name)}:</b> ${esc(state)}</li>`).join("");
+      statusRows.push(`<div class="dashboard-status-row"><b>Scheduler:</b> ${runtime.scheduler_enabled ? "enabled" : "disabled; manual checks remain available"}</div>`);
+      statusRows.push(`<div class="dashboard-status-row"><b>Configured provider status:</b><ul class="list">${providerList || "<li>No provider status returned.</li>"}</ul></div>`);
+    } else statusRows.push(`<div class="dashboard-status-row"><b>Provider status:</b> unavailable (${esc(runtimeResult.reason.message)}).</div>`);
+    monitoring.innerHTML = `<div class="dashboard-status-list">${statusRows.join("")}</div>`;
   } catch (e) {
     cards.innerHTML = "";
     recent.innerHTML = `<div class='state error'>Could not load dashboard: ${esc(e.message)}</div>`;
@@ -275,10 +304,82 @@ $("#sub-btn").addEventListener("click", async () => {
 
 /* ---------- investigate ---------- */
 $("#inv-btn").addEventListener("click", runPipeline);
+let imagePreviewUrl = null;
+let imageValidationRun = 0;
+$("#inv-image").addEventListener("change", updateImagePreview);
+$("#inv-image-remove").addEventListener("click", () => {
+  $("#inv-image").value = "";
+  clearImagePreview();
+});
+
+function clearImagePreview() {
+  imageValidationRun += 1;
+  if (imagePreviewUrl) URL.revokeObjectURL(imagePreviewUrl);
+  imagePreviewUrl = null;
+  $("#inv-image-preview").hidden = true;
+  $("#inv-image-preview-img").removeAttribute("src");
+  $("#inv-image-status").textContent = "";
+  $("#inv-image-error").hidden = true;
+  $("#inv-image").removeAttribute("aria-invalid");
+  $("#inv-image").disabled = false;
+}
+
+async function updateImagePreview() {
+  clearImagePreview();
+  const file = $("#inv-image").files[0];
+  if (!file) return;
+  const status = $("#inv-image-status");
+  const preview = $("#inv-image-preview");
+  const error = $("#inv-image-error");
+  const validationRun = imageValidationRun;
+  status.textContent = "Validating image…";
+  preview.hidden = false;
+  $("#inv-image").disabled = true;
+  try {
+    const dimensions = await validateImageFile(file);
+    if (validationRun !== imageValidationRun) return;
+    imagePreviewUrl = URL.createObjectURL(file);
+    $("#inv-image-preview-img").src = imagePreviewUrl;
+    status.textContent = `${file.name} · ${dimensions.width} × ${dimensions.height} pixels · ${(file.size / 1024 / 1024).toFixed(2)} MB`;
+    $("#inv-image").removeAttribute("aria-invalid");
+  } catch (e) {
+    if (validationRun !== imageValidationRun) return;
+    preview.hidden = true;
+    error.textContent = `Image cannot be used: ${e.message} Choose another image or remove it before investigating.`;
+    error.hidden = false;
+    $("#inv-image").setAttribute("aria-invalid", "true");
+  } finally {
+    if (validationRun === imageValidationRun) $("#inv-image").disabled = false;
+  }
+}
+
 async function runPipeline() {
+  const button = $("#inv-btn");
+  if (button.disabled) return;
+  button.disabled = true;
+  button.setAttribute("aria-busy", "true");
+  const originalLabel = button.textContent;
+  button.textContent = "Running investigation…";
+  try {
+    await executePipeline();
+  } catch (e) {
+    $("#inv-result").innerHTML = `<div class='state error' role='alert'>Investigation could not finish: ${esc(e.message)}</div>`;
+    const failureSummary = `<div class='panel summary-lead' role='status'><h2>Investigation incomplete</h2><p>Pipeline stopped before all results were available: ${esc(e.message)}</p><p>No findings are inferred from the interruption.</p></div>`;
+    $("#inv-summary-inline").innerHTML = failureSummary;
+    showInvestigationCompletionDialog($("#inv-completion-dialog"), failureSummary);
+    flash(`Investigation could not finish: ${e.message}`, false);
+  } finally {
+    button.disabled = false;
+    button.removeAttribute("aria-busy");
+    button.textContent = originalLabel;
+  }
+}
+
+async function executePipeline() {
   let target = $("#inv-target").value.trim();
   const candidateType = $("#inv-type").value;
   const out = $("#inv-result");
+  const summaryOut = $("#inv-summary-inline");
   if (!target) { flash("Enter a target first", false); return; }
   if (candidateType === "social_profile") {
     const handle = normalizeSocialHandle(target);
@@ -303,7 +404,18 @@ async function runPipeline() {
   const stage = {};
   stage.candidate_target = target;
   stage.candidate_type = candidateType;
-  const render = () => { out.innerHTML = renderInvestigation(target, stage); };
+  let completionShown = false;
+  const render = (complete = false) => {
+    const summary = buildInvestigationSummary(target, stage, candidateType);
+    summary.completion_status = complete
+      ? (summary.missing_evidence.length || Object.entries(stage).some(([, result]) => hasIncompleteResult(result)) ? "incomplete" : "complete")
+      : "in progress";
+    const summaryMarkup = renderInvestigationSummary(summary);
+    summaryOut.innerHTML = summaryMarkup;
+    out.innerHTML = renderInvestigation(target, stage);
+    return summaryMarkup;
+  };
+  render();
   const isHandle = (candidateType === "social_profile" || candidateType === "auto") &&
     normalizeSocialHandle(target).valid && target.startsWith("@");
   const isApplication = candidateType === "app_listing";
@@ -425,13 +537,19 @@ async function runPipeline() {
       render();
     })(),
   ]);
+  const finalSummaryMarkup = render(true);
+  if (!completionShown) {
+    completionShown = showInvestigationCompletionDialog($("#inv-completion-dialog"), finalSummaryMarkup);
+  }
   // Keep the last investigation so it can be attached to a case.
   store.lastInvestigation = { target, stage };
   store.snapshots.push({ label: `${target} — ${new Date().toLocaleTimeString()}`, snapshot: buildSnapshot(stage) });
   refreshSnapshotOptions();
   const incompleteStages = Object.entries(stage).filter(([, result]) => hasIncompleteResult(result)).map(([name]) => name);
-  if (incompleteStages.length) {
-    flash(`Pipeline finished with incomplete or held stages: ${incompleteStages.join(", ")}`, false);
+  const summaryHasGaps = buildInvestigationSummary(target, stage, candidateType).missing_evidence.length > 0;
+  if (incompleteStages.length || summaryHasGaps) {
+    const detail = incompleteStages.length ? incompleteStages.join(", ") : "see summary evidence gaps";
+    flash(`Pipeline finished with incomplete or held results: ${detail}`, false);
   } else {
     flash("Pipeline complete");
   }
@@ -450,15 +568,7 @@ function hasIncompleteResult(result) {
 }
 
 async function encodeImageFile(file) {
-  const maxBytes = 10 * 1024 * 1024;
-  const supported = ["image/jpeg", "image/png", "image/gif", "image/webp"];
-  if (!supported.includes(file.type)) throw new Error("Select a JPEG, PNG, GIF or WebP image.");
-  if (file.size < 1 || file.size > maxBytes) throw new Error("Image must be between 1 byte and 10 MB.");
-  if (typeof createImageBitmap !== "function") throw new Error("This browser cannot validate image contents.");
-  const bitmap = await createImageBitmap(file);
-  const validDimensions = bitmap.width > 0 && bitmap.height > 0 && bitmap.width * bitmap.height <= 40_000_000;
-  bitmap.close();
-  if (!validDimensions) throw new Error("Image dimensions are invalid or exceed 40 megapixels.");
+  await validateImageFile(file);
   const bytes = new Uint8Array(await file.arrayBuffer());
   let binary = "";
   for (let offset = 0; offset < bytes.length; offset += 0x8000) {
@@ -466,6 +576,27 @@ async function encodeImageFile(file) {
   }
   const base64 = btoa(binary);
   return { base64, dataUri: `data:${file.type};base64,${base64}` };
+}
+
+async function validateImageFile(file) {
+  const maxBytes = 10 * 1024 * 1024;
+  const supported = ["image/jpeg", "image/png", "image/gif", "image/webp"];
+  if (!supported.includes(file.type)) throw new Error("Select a JPEG, PNG, GIF or WebP image.");
+  if (file.size < 1 || file.size > maxBytes) throw new Error("Image must be between 1 byte and 10 MB.");
+  if (typeof createImageBitmap !== "function") throw new Error("This browser cannot validate image contents.");
+  let bitmap;
+  try {
+    bitmap = await createImageBitmap(file);
+    if (bitmap.width < 1 || bitmap.height < 1 || bitmap.width * bitmap.height > 40_000_000) {
+      throw new Error("Image dimensions are invalid or exceed 40 megapixels.");
+    }
+    return { width: bitmap.width, height: bitmap.height };
+  } catch (e) {
+    if (e instanceof Error && e.message.includes("dimensions")) throw e;
+    throw new Error("Image could not be decoded. Choose a valid JPEG, PNG, GIF or WebP file.");
+  } finally {
+    bitmap?.close();
+  }
 }
 
 function mergeAnalysisResults(primary, image) {
@@ -501,21 +632,50 @@ function renderInvestigationSummary(summary) {
   const list = (items) => items.length
     ? `<ul class="list">${items.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>`
     : "<div class='muted'>None reported.</div>";
-  return `<div class="panel" style="margin-top:16px"><h2>Investigation summary — ${esc(summary.disposition.replaceAll("_", " "))}</h2>
-    <div class="kv">
-      <div class="k">Candidate</div><div>${esc(summary.candidate)} <span class="tag">${esc(summary.candidate_type)}</span></div>
-      <div class="k">Gate decision</div><div>${esc(summary.gate)}</div>
-      <div class="k">Rules</div><div>${esc(summary.rules)}</div>
-      <div class="k">ML prediction</div><div>${esc(summary.ml)}</div>
-      <div class="k">Risk score</div><div>${esc(summary.risk_score)}</div>
-      <div class="k">Grounded / investigator analysis</div><div>${esc(summary.ai_analysis)}</div>
-      <div class="k">Next step</div><div>${esc(summary.next_step)}</div>
-    </div><h3>Evidence sources examined</h3>${list(summary.evidence_examined)}
-    <h3>Missing evidence and limitations</h3>${list(summary.missing_evidence)}</div>`;
+  const mainFindings = summary.main_findings?.length ? list(summary.main_findings)
+    : "<div class='muted'>No specific finding was returned by the completed stages.</div>";
+  const stages = summary.stage_statuses?.length ? list(summary.stage_statuses)
+    : "<div class='muted'>Stage results are not yet available.</div>";
+  const cited = (items, renderItem) => items?.length
+    ? `<ul class="list">${items.map(renderItem).join("")}</ul>`
+    : "<div class='muted'>None returned.</div>";
+  const citations = (items) => items?.length
+    ? `<div class="muted">Sources: ${items.map(esc).join(" · ")}</div>` : "<div class='muted'>No source reference returned.</div>";
+  const meter = typeof summary.risk_score_value === "number"
+    ? `<meter min="0" max="1" value="${esc(summary.risk_score_value)}" aria-label="Risk prioritization score, not probability"></meter>`
+    : `<div class="muted">No score returned.</div>`;
+  return `<div class="panel" style="margin-top:16px" aria-live="polite">
+    <h2>At a glance — <span class="tag">Disposition: ${esc(summary.disposition.replaceAll("_", " "))}</span> <span class="tag">${esc(summary.completion_status || "complete")}</span></h2>
+    <div class="summary-lead"><h3>${esc(summary.assessment || "Results are inconclusive.")}</h3>
+      <p><strong>Risk ranking:</strong> ${esc(summary.risk_score)}</p>
+      ${meter}${summary.risk_classification ? `<p>Classification: ${esc(summary.risk_classification)}</p>` : ""}
+      <p><strong>Evidence strength:</strong> No separate evidence-strength score is returned. ${summary.input_quality?.length ? `Risk-service input quality notes: ${summary.input_quality.map(esc).join("; ")}` : "Review the source-backed observations and citations below."}</p>
+      <p style="margin-bottom:0">Risk score, evidence strength, investigation coverage, and provider availability are separate. A score is a prioritization aid, not a probability. Missing evidence is not proof of safety.</p>
+    </div>
+    <div class="summary-sections">
+      <section class="summary-section"><h3>Rule findings</h3>${cited(summary.rule_findings, (item) => `<li>${esc(item.text)}${item.severity ? ` <span class="tag">${esc(item.severity)}</span>` : ""}${citations(item.evidence_refs)}</li>`)}</section>
+      <section class="summary-section"><h3>Analyzer observations</h3>${cited(summary.analyzer_observations, (item) => `<li>${esc(item)}</li>`)}</section>
+      <section class="summary-section"><h3>Cited claims</h3>${cited(summary.cited_claims, (item) => `<li><b>${esc(item.kind)}:</b> ${esc(item.text)}${citations(item.citations)}</li>`)}</section>
+      <section class="summary-section"><h3>Investigator findings</h3>${cited(summary.investigator_findings, (item) => `<li>${esc(item.text)}${item.source ? `<div class="muted">Source: ${esc(item.source)}</div>` : ""}${citations(item.citations)}</li>`)}</section>
+      <section class="summary-section"><h3>Recommendations</h3>${cited(summary.recommendations, (item) => `<li>${esc(item.text)}${item.basis ? `<div class="muted">Basis: ${esc(item.basis)}</div>` : ""}${citations(item.citations)}</li>`)}</section>
+      <section class="summary-section"><h3>Evidence coverage</h3>${list(summary.evidence_coverage || [])}</section>
+      <section class="summary-section"><h3>Other returned evidence</h3>${mainFindings}</section>
+      <section class="summary-section"><h3>Stage status</h3>${stages}</section>
+      <section class="summary-section"><h3>Provider status and evidence gaps</h3>${list(summary.missing_evidence)}</section>
+      <section class="summary-section"><h3>Recommended next step</h3><p>${esc(summary.next_step)}</p></section>
+    </div>
+    <details class="summary-details"><summary>Technical details and evidence limitations</summary>
+      <div class="kv" style="margin-top:12px">
+        <div class="k">Candidate</div><div>${esc(summary.candidate)} <span class="tag">${esc(summary.candidate_type)}</span></div>
+        <div class="k">Gate decision</div><div>${esc(summary.gate)}</div>
+        <div class="k">Rules</div><div>${esc(summary.rules)}</div>
+        <div class="k">ML prediction</div><div>${esc(summary.ml)}</div>
+        <div class="k">Grounded / investigator analysis</div><div>${esc(summary.ai_analysis)}</div>
+      </div><h3>Evidence sources examined</h3>${list(summary.evidence_examined)}
+    </details></div>`;
 }
 
 function renderInvestigation(target, stage) {
-  const summary = buildInvestigationSummary(target, stage, stage.candidate_type || "auto");
   const gate = stage.gate;
   let gateLine = "<div class='state'>Loading…</div>";
   if (gate) {
@@ -527,8 +687,7 @@ function renderInvestigation(target, stage) {
         <div class="k">Audit id</div><div class="mono">${gate.data.audit_id ?? "—"}</div>
       </div>`;
   }
-  return `${renderInvestigationSummary(summary)}
-  ${stage.social_discovery ? stagePanel("Authorized social profile discovery", stage.social_discovery, renderSocialDiscovery) : ""}
+  return `${stage.social_discovery ? stagePanel("Authorized social profile discovery", stage.social_discovery, renderSocialDiscovery) : ""}
   ${stage.image_submission ? stagePanel("Image evidence persistence", stage.image_submission, renderImageSubmission) : ""}
   ${stage.image_transcript_submission ? stagePanel("OCR transcript persistence", stage.image_transcript_submission, renderImageSubmission) : ""}
   ${stage.image_vision_submission ? stagePanel("Vision observation persistence", stage.image_vision_submission, renderImageSubmission) : ""}
@@ -685,20 +844,26 @@ function renderInvestigate(data) {
 }
 
 /* ---------- cases ---------- */
-function caseTable(cases, clickable = true) {
+function caseTable(cases, clickable = true, showOpenAction = false) {
   const rows = cases.map((c) =>
     `<tr class="${clickable ? "row" : ""}" data-id="${c.id}">
       <td class="mono">#${c.id}</td><td>${esc(c.title)}</td>
       <td class="mono" style="max-width:230px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.target)}</td>
       <td>${statusBadge(c.status)}</td><td>${gateBadge(c.gate_outcome)}</td>
       <td>${c.alert_eligible ? badge("eligible", "b-bad") : badge("no", "b-ok")}</td>
+      ${showOpenAction ? `<td><button class="btn sm secondary" data-open-case="${c.id}">Open</button></td>` : ""}
       <td class="muted">${fmtDate(c.created_at)}</td></tr>`).join("");
-  return `<table><tr><th>Id</th><th>Title</th><th>Target</th><th>Status</th><th>Gate</th><th>Alert</th><th>Created</th></tr>${rows}</table>`;
+  return `<table><tr><th>Id</th><th>Title</th><th>Target</th><th>Status</th><th>Gate</th><th>Alert</th>${showOpenAction ? "<th>Action</th>" : ""}<th>Created</th></tr>${rows}</table>`;
 }
 
 function bindRowClicks(container) {
   container.querySelectorAll("tr.row").forEach((tr) =>
     tr.addEventListener("click", () => showCaseDetail(tr.dataset.id)));
+  container.querySelectorAll("button[data-open-case]").forEach((button) =>
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      showCaseDetail(button.dataset.openCase);
+    }));
 }
 
 async function loadCases() {
@@ -742,6 +907,8 @@ function refreshSnapshotOptions() {
 }
 
 async function showCaseDetail(id) {
+  const casesNavButton = $("#nav button[data-view='cases']");
+  if (casesNavButton && !casesNavButton.classList.contains("active")) casesNavButton.click();
   const el = $("#case-detail");
   el.style.display = "block";
   el.innerHTML = "<div class='state'>Loading…</div>";

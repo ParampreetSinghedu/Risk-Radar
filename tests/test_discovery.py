@@ -4,6 +4,7 @@ import hashlib
 from datetime import datetime
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from risk_radar.api.v1.discover import get_discovery_service
@@ -261,6 +262,30 @@ def test_urlhaus_connector_handles_no_results_and_missing_key() -> None:
         assert "URLHAUS_AUTH_KEY" in str(exc)
 
 
+@pytest.mark.parametrize(
+    "body",
+    [[], {"query_status": "ok", "urls": {}}, {"query_status": "ok", "urls": [None]}],
+)
+def test_urlhaus_malformed_provider_responses_are_explicit(body) -> None:
+    client = httpx.Client(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=body))
+    )
+    with pytest.raises(ConnectorError, match="response"):
+        URLhausConnector(auth_key="test-key", client=client).search("evil.example")
+
+
+@pytest.mark.parametrize(
+    ("status", "message"),
+    [(401, "authentication failed"), (429, "rate limited"), (503, "HTTP 503")],
+)
+def test_urlhaus_http_errors_are_explicit(status, message) -> None:
+    client = httpx.Client(
+        transport=httpx.MockTransport(lambda request: httpx.Response(status))
+    )
+    with pytest.raises(ConnectorError, match=message):
+        URLhausConnector(auth_key="test-key", client=client).search("evil.example")
+
+
 def test_openphish_connector_filters_feed_by_query() -> None:
     """The OpenPhish adapter yields only feed lines matching the query."""
     feed = "http://other.example/login\nhttp://phish.example/acme/login\n\n# comment\n"
@@ -293,6 +318,70 @@ def test_openphish_connector_reports_network_failure() -> None:
         raise AssertionError("expected ConnectorError")
     except ConnectorError as exc:
         assert "openphish" in str(exc)
+
+
+@pytest.mark.parametrize(
+    ("response", "message"),
+    [
+        (httpx.Response(429), "HTTP 429"),
+        (httpx.Response(503), "HTTP 503"),
+    ],
+)
+def test_openphish_reports_http_status_and_applies_timeout(response, message) -> None:
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.extensions.get("timeout", {}).get("read"))
+        return response
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    with pytest.raises(ConnectorError, match=message):
+        OpenPhishConnector(client=client).search("acme")
+    assert seen == [10.0]
+
+
+def test_openphish_reports_timeout_without_fabricating_results() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("offline", request=request)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    with pytest.raises(ConnectorError, match="timed out"):
+        OpenPhishConnector(client=client).search("acme")
+
+
+def test_openphish_follows_public_feed_redirect() -> None:
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(str(request.url))
+        if len(requests) == 1:
+            return httpx.Response(
+                302,
+                headers={
+                    "location": "https://raw.githubusercontent.com/openphish/public_feed/main/feed.txt"
+                },
+            )
+        return httpx.Response(200, text="https://phish.example/acme/login\n")
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        candidates = OpenPhishConnector(client=client).search("acme")
+
+    assert requests == [
+        FEED_URL,
+        "https://raw.githubusercontent.com/openphish/public_feed/main/feed.txt",
+    ]
+    assert [candidate.target for candidate in candidates] == [
+        "https://phish.example/acme/login"
+    ]
+
+
+def test_openphish_rejects_blank_query_without_fetching() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("blank query must not fetch the entire feed")
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ConnectorError, match="query is empty"):
+            OpenPhishConnector(client=client).search("  ")
 
 
 def test_interface_only_connector_reports_unavailability() -> None:

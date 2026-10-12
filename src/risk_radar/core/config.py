@@ -108,11 +108,15 @@ class Settings(BaseSettings):
     vision_model: str = "claude-haiku-4-5-20251001"
     llm_fallback_providers: str = ""
     anthropic_api_key: SecretStr | None = None
+    # Optional explicit path for the local Tesseract executable. If unset,
+    # the OCR adapter preserves its existing PATH lookup behavior.
+    tesseract_cmd: str | None = None
     apinex_api_key: SecretStr | None = None
     apinex_base_url: str = "https://api.apinex.bond/v1"
     apinex_model: str = "free/deepseek-v4-flash-0731"
     groq_api_key: SecretStr | None = None
     groq_model: str = "llama-3.3-70b-versatile"
+    groq_vision_model: str = "qwen/qwen3.8-27b"
     openrouter_api_key: SecretStr | None = None
     openrouter_model: str = "deepseek/deepseek-chat"
     ollama_base_url: str = "http://localhost:11434/v1"

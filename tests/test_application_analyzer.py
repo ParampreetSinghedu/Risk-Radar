@@ -112,6 +112,36 @@ def test_apple_provider_error_is_reported_without_negative_finding(client):
     http.close()
 
 
+def test_apple_lookup_empty_and_malformed_results_are_unavailable():
+    for payload in ({"resultCount": 0, "results": []}, {"results": "bad"}, []):
+        http = httpx.Client(
+            transport=httpx.MockTransport(
+                lambda request, body=payload: httpx.Response(200, json=body)
+            )
+        )
+        metadata, limitation = AppleStoreLookup(http).lookup("apple_app_store", "12345")
+        assert metadata is None
+        assert limitation
+        http.close()
+
+
+def test_malformed_apple_id_does_not_call_lookup(client):
+    class Lookup:
+        called = False
+
+        def lookup(self, store, identifier):
+            self.called = True
+            return None, "unexpected lookup"
+
+    lookup = Lookup()
+    result = ApplicationListingAnalyzer(lookup).analyze(
+        _session(client), "https://apps.apple.com/app/idnot-a-number"
+    )
+    assert result.status == "partial"
+    assert not lookup.called
+    assert not result.observations
+
+
 def test_app_listing_endpoint_returns_application_analysis(client):
     response = client.post(
         "/api/v1/evidence/analyze",

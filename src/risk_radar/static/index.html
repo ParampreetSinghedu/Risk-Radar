@@ -57,6 +57,30 @@
   .state { padding: 26px; text-align: center; color: var(--muted); font-size: 13.5px; }
   .state.error { color: var(--bad); }
   .muted { color: var(--muted); }
+  .image-preview { display: flex; align-items: flex-start; gap: 14px; margin-top: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 10px; }
+  .image-preview[hidden], #inv-image-error[hidden] { display: none; }
+  .image-preview img { display: block; max-width: min(100%, 320px); max-height: 220px; object-fit: contain; border-radius: 6px; background: #080d17; }
+  .summary-lead { padding: 14px; border-left: 4px solid var(--info); border-radius: 6px; background: var(--panel2); }
+  .summary-lead h3 { margin: 0 0 6px; color: var(--text); font-size: 16px; text-transform: none; letter-spacing: 0; }
+  .summary-sections { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin-top: 14px; }
+  .summary-section { padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
+  .summary-section h3 { margin: 0 0 8px; }
+  .summary-details { margin-top: 14px; }
+  .summary-details > summary { cursor: pointer; color: var(--info); }
+  dialog.completion-dialog { width: min(920px, calc(100vw - 24px)); max-height: min(88vh, 900px); overflow: auto; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 14px; padding: 18px; }
+  dialog.completion-dialog::backdrop { background: rgba(3, 7, 14, .78); }
+  .completion-dialog-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; position: sticky; top: -18px; padding: 8px 0; background: var(--bg); z-index: 1; }
+  .completion-dialog-header h2 { margin: 0; font-size: 18px; }
+  #inv-completion-summary .panel { margin-top: 8px !important; }
+  #inv-summary-inline:empty { display: none; }
+  meter { width: min(100%, 420px); height: 16px; display: block; margin: 8px 0; }
+  @media (max-width: 560px) { dialog.completion-dialog { padding: 12px; } .kv { grid-template-columns: 1fr; } }
+  .dashboard-intro { display: flex; align-items: center; justify-content: space-between; gap: 18px; flex-wrap: wrap; margin-bottom: 18px; }
+  .dashboard-intro h2 { margin: 0 0 4px; font-size: 21px; }
+  .dashboard-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+  .dashboard-actions .btn { margin: 0; }
+  .dashboard-status-list { display: grid; gap: 9px; }
+  .dashboard-status-row { padding: 9px 11px; border-radius: 8px; background: var(--panel2); }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
   .kv { display: grid; grid-template-columns: 190px 1fr; gap: 6px 14px; font-size: 13.5px; }
   .kv .k { color: var(--muted); }
@@ -111,7 +135,17 @@
 
   <!-- DASHBOARD -->
   <section id="view-dashboard" class="view active">
+    <div class="dashboard-intro">
+      <div><h2>Operations overview</h2><div class="muted">Review stored cases, provider availability and monitoring changes.</div></div>
+      <div class="dashboard-actions" aria-label="Dashboard shortcuts">
+        <button type="button" class="btn" data-dashboard-view="investigate">New investigation</button>
+        <button type="button" class="btn secondary" data-dashboard-view="monitoring">Monitoring targets</button>
+        <button type="button" class="btn secondary" data-dashboard-view="cases">Review cases</button>
+        <a class="btn secondary" href="/project">Project overview</a>
+      </div>
+    </div>
     <div class="cards" id="dash-cards"></div>
+    <div class="panel" aria-live="polite"><h2>Monitoring and provider status</h2><div id="dash-monitoring"><div class="state">Loading…</div></div></div>
     <div class="panel">
       <h2>Recent cases</h2>
       <div id="dash-recent"><div class="state">Loading…</div></div>
@@ -157,8 +191,15 @@
       <input type="text" id="inv-target" placeholder="https://suspicious.example.com" />
       <label for="inv-image">Screenshot evidence (optional, JPEG / PNG / GIF / WebP, up to 10 MB)</label>
       <input type="file" id="inv-image" accept="image/jpeg,image/png,image/gif,image/webp" aria-describedby="inv-image-help" />
-      <div id="inv-image-help" class="muted" style="font-size:12px">The server validates image content before OCR. Uploaded images are retained as submitted evidence when the investigation runs.</div>
+      <div id="inv-image-help" class="muted" style="font-size:12px">Images are validated before analysis. Available OCR or vision providers are reported in the results; an unavailable provider does not produce guessed observations.</div>
+      <div id="inv-image-preview" class="image-preview" hidden>
+        <img id="inv-image-preview-img" alt="Selected screenshot preview" />
+        <div><div id="inv-image-status" role="status" aria-live="polite"></div>
+          <button type="button" class="btn secondary sm" id="inv-image-remove">Remove image</button></div>
+      </div>
+      <div id="inv-image-error" class="state error" role="alert" hidden></div>
       <button class="btn" id="inv-btn">Run pipeline</button>
+      <div id="inv-summary-inline" aria-live="polite" aria-atomic="true"></div>
       <div id="inv-result"></div>
     </div>
   </section>
@@ -301,8 +342,15 @@
     </div>
   </section>
 </main>
+<dialog id="inv-completion-dialog" class="completion-dialog" aria-labelledby="inv-completion-title">
+  <div class="completion-dialog-header">
+    <h2 id="inv-completion-title">Investigation results</h2>
+    <form method="dialog"><button type="submit" class="btn secondary sm" aria-label="Close investigation summary">Close</button></form>
+  </div>
+  <div id="inv-completion-summary"></div>
+</dialog>
 <script src="/candidate_input.js"></script>
 <script src="/investigation_summary.js"></script>
-<script src="/app.js"></script>
+<script src="/app.js?v=dashboard-case-open-1"></script>
 </body>
 </html>

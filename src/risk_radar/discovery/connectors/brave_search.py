@@ -50,7 +50,7 @@ class BraveSearchConnector(DiscoveryConnector):
 
     def search(self, query: str) -> list[Candidate]:
         """Return sourced URL/title/snippet candidates, never retrieved page content."""
-        if not self._api_key:
+        if not self._api_key or not self._api_key.strip():
             raise ConnectorUnavailableError(
                 "brave_search: BRAVE_SEARCH_API_KEY is not configured"
             )
