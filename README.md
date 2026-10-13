@@ -123,7 +123,7 @@ The full request and response schemas are available at `/docs` while the app is 
 
 ## Docker Compose and deployment
 
-The Docker image uses Python 3.12 and starts Uvicorn on port 8000. It installs the base project dependencies only; it does not install the optional `ocr` extra or the Tesseract executable. Docker Compose defines the API, PostgreSQL, Redis, and MinIO services. Compose requires `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `MINIO_ACCESS_KEY`, and `MINIO_SECRET_KEY` in `.env`; replace the example values before use. The published-port variables are optional.
+The Docker image uses Python 3.12, installs the `ocr` extra and Tesseract executable, runs Alembic migrations at container startup, and starts Uvicorn on Render's `PORT` (or port 8000 when unset). Docker Compose defines the API, PostgreSQL, Redis, and MinIO services. Compose requires `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `MINIO_ACCESS_KEY`, and `MINIO_SECRET_KEY` in `.env`; replace the example values before use. The published-port variables are optional.
 
 For a fresh Compose database, build the image, start its dependencies, apply migrations, then start the API:
 
@@ -135,9 +135,9 @@ docker compose run --rm --no-deps api alembic upgrade head
 docker compose up -d api
 ```
 
-The API startup creates tables automatically only for SQLite. PostgreSQL schema changes require `alembic upgrade head`; Compose does not run migrations automatically. The compose health route checks API liveness, not provider readiness. MinIO is configured in the stack, but its presence alone does not mean every evidence upload is persisted there.
+The API startup creates tables automatically only for SQLite. PostgreSQL schema changes require `alembic upgrade head`; the Docker container runs this migration at startup, and the explicit Compose migration command above can be used to apply it before starting the API. The compose health route checks API liveness, not provider readiness. MinIO is configured in the stack, but its presence alone does not mean every evidence upload is persisted there.
 
-No Render manifest or automated deployment workflow is present in this repository. A Render deployment therefore needs an operator-configured Python 3.12 Docker service (or equivalent image build), persistent PostgreSQL connection through `DATABASE_URL` or `POSTGRES_*`, and an explicit Alembic migration step for schema changes. Configure only provider credentials actually needed. Render's runtime has not been verified for Tesseract; production OCR requires adding/configuring both the optional Python binding and the Tesseract executable, including `TESSERACT_CMD` where needed. Do not treat local OCR tests as deployment verification.
+No Render manifest or automated deployment workflow is present in this repository. The current production service uses Render's native Python runtime, which does not run the Dockerfile's Tesseract installation. To enable OCR, configure the existing service to use the root Dockerfile, retain its PostgreSQL connection through `DATABASE_URL` or `POSTGRES_*`, and preserve its required provider settings. The Docker container runs `alembic upgrade head` before starting Uvicorn; this keeps migrations in the startup path for Free services, where Render's separate pre-deploy command is unavailable. Verify the deployment and OCR behavior after switching; local OCR tests do not establish production behavior.
 
 ## Known limitations and verification status
 
