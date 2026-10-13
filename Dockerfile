@@ -9,7 +9,10 @@ COPY pyproject.toml README.md alembic.ini ./
 COPY migrations ./migrations
 COPY src ./src
 COPY app ./app
-RUN pip install --no-cache-dir .
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y tesseract-ocr \
+    && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir ".[ocr]"
 
 EXPOSE 8000
 
